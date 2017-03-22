@@ -2,7 +2,6 @@
 
 import sys
 import re
-from enum import Enum
 from stringUtils import getChar, getChars, setChar, stealLetter
 from outputUtils import printErrors
 
@@ -29,11 +28,6 @@ IGNORE_LAST_N_SYMBOLS = 5;
 
 PRINT_COLOURED_DIFF = len(sys.argv) >= 3 and sys.argv[2] == "DEBUG";
 
-# Used to perform a simple scan state machine sthingy.
-class ScanState(Enum):
-    BEFORE_GAP = 0
-    IN_GAP = 1
-    AFTER_GAP = 2
 
 def readUntil(f, sentinel):
     """
