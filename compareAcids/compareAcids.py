@@ -85,6 +85,61 @@ def getStartPoint(readMatch, refMatch):
 
     return startPoint
 
+def hasMultipleGaps(readMatch):
+    """
+    Return true iff readMatch contains multiple gaps.
+    """
+
+    # This regex looks for 3 distinct islands of letters. That implies at least two gaps.
+    return re.search('[ATGC]+-+[ATGC]+-+[ATGC]+', readMatch) != None
+
+def findGap(readMatch):
+    """
+    Get the start and end index (as a 2-tuple) of the gap in readMatch, or None if there isn't one.
+    """
+
+    # Find the gap, captured in group 1. This gives us the indexes in the string where the gap starts and
+    # ends. (we define "gap" as "dashes in between letters". We previously used hasMultipleGaps to reject
+    # any strings which have multiple gaps (which would confuse this regex)).
+    match = re.search('[ATGC]+(-+)[ATGC]+', readMatch)
+    if match == None:
+        # No gap exists.
+        return None
+
+    return (match.start(1), match.end(1))
+
+
+def gapAlign(readMatch, gap):
+    """
+    Perform the "letter-stealing" operation:
+    - Find the gap (if there is one).
+    - While the gap startpoint is not aligned to a triplet boundary, move letters from the end of the gap
+      to the start of the gap.
+
+    @param readMatch Aligned read to process.
+    @param gap The gap, as returned by findGap.
+    """
+
+    old = readMatch
+
+    # Shift letters from the end to the start...
+    while gap[0] % 3 != 0:
+        assert(readMatch[gap[0]] == "-")
+
+        # This means we ran out of symbols to steal before we managed to align.
+        # This indicates a gap at the end, and one we can't fix. Reject!
+        if readMatch[gap[1]] == "-":
+            return None
+
+        c = readMatch[gap[1]]
+        readMatch = setChar(readMatch, c, gap[0])
+        readMatch = setChar(readMatch, "-", gap[1])
+
+        # Shift the gap to the right...
+        gap = (gap[0] + 1, gap[1] + 1)
+
+    return readMatch
+
 
 def summarizeChanges(readMatch, refMatch):
     """
@@ -92,8 +147,29 @@ def summarizeChanges(readMatch, refMatch):
     """
     errors = []
 
+    # Reject reads with multiple gaps
+    if hasMultipleGaps(readMatch):
+        print("Rejected (multigap)")
+        return
+
     readMatch = cullEnds(readMatch)
     startPoint = getStartPoint(readMatch, refMatch)
+
+    # Reject reads with gaps that aren't a multiple of 3 in length.
+    gap = findGap(readMatch);
+    if gap != None:
+        gapSize = (gap[1] - gap[0])
+
+        if gapSize % 3 != 0:
+            print("Rejected (gap of size %i)" % gapSize);
+            return
+
+        # Perform letter-stealing across the gap (if any). The resulting modified read will be ready for naive
+        # triplet-wise comparison.
+        readMatch = gapAlign(readMatch, gap)
+        if readMatch == None:
+            print("Rejected (unalignable gap at end)")
+            return
 
     # We've got to find and report several types of difference: insertion, deletion, and substitution.
     # We'll begin by running through the strings until we find the first 3-letter block that contains a "-"
@@ -116,7 +192,8 @@ def summarizeChanges(readMatch, refMatch):
         if re.search('[ATGC]', suffix) == None and "-" in actualAcid:
             continue
 
-        # Add the error to the list.
+
+        # Compare the triplets!
         if expectedAcid != actualAcid:
             errors.append({
                 'position': i,
@@ -125,7 +202,7 @@ def summarizeChanges(readMatch, refMatch):
             });
 
     if len(errors) > MAX_ERRORS:
-        print("Rejected");
+        print("Rejected (errcount)");
     else:
         printErrors(errors, readMatch, refMatch, PRINT_COLOURED_DIFF);
 
