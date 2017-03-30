@@ -1,9 +1,16 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 
 import sys
+
+# Demand Python 3.
+if sys.version_info[0] < 3:
+    print "Python 3 is required, but you're using Python %i.%i.%i" % (sys.version_info[0], sys.version_info[1], sys.version_info[2])
+    sys.exit(1)
+
 import re
 from stringUtils import getChar, getChars, setChar, stealLetter
 from outputUtils import printErrors
+
 
 # Count ones with non-multiple of 3 gaps
 # Steal symbols across %3 gaps to align gaps and stuff.
