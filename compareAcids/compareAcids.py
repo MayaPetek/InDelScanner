@@ -4,7 +4,7 @@ import sys
 
 # Demand Python 3.
 if sys.version_info[0] < 3:
-    print "Python 3 is required, but you're using Python %i.%i.%i" % (sys.version_info[0], sys.version_info[1], sys.version_info[2])
+    print ("Python 3 is required, but you are using Python %i.%i.%i") % (sys.version_info[0], sys.version_info[1], sys.version_info[2])
     sys.exit(1)
 
 import re
@@ -30,8 +30,8 @@ MAX_ERRORS = 10;
 
 # Overwrite this many symbols at the start/end of the read string with "-". This apparently helps work around
 # some flavours of aligner unreliability.
-IGNORE_FIRST_N_SYMBOLS = 5;
-IGNORE_LAST_N_SYMBOLS = 5;
+IGNORE_FIRST_N_SYMBOLS = 0;
+IGNORE_LAST_N_SYMBOLS = 0;
 
 PRINT_COLOURED_DIFF = len(sys.argv) >= 3 and sys.argv[2] == "DEBUG";
 
