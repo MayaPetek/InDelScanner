@@ -33,6 +33,11 @@ MAX_ERRORS = 10;
 IGNORE_FIRST_N_SYMBOLS = 0;
 IGNORE_LAST_N_SYMBOLS = 0;
 
+# Require N end symbol of the read to match reference. If there are mutations at the very end of a read, it is
+# impossible to tell what the real mutation was (substitution, misplaced InDel, combination)
+MATCH_N_END_SYMBOLS = 1;
+
+
 PRINT_COLOURED_DIFF = len(sys.argv) >= 3 and sys.argv[2] == "DEBUG";
 
 
@@ -47,8 +52,6 @@ def readUntil(f, sentinel):
         line = f.readline().rstrip()
 
     return out;
-
-# TODO: Interpret change types.
 
 def cullEnds(readMatch):
     # Overwrite the first few non-dashes with dashes.
@@ -71,14 +74,44 @@ def cullEnds(readMatch):
 def getStartPoint(readMatch, refMatch):
     """
     Figure out where the first symbol of interest in the read is. This start point should be:
-    - Triplet-aligned
     - Not a -.
+    - Not (yet) triplet aligned
     """
     startPoint = 0
     for i in range(0, len(refMatch)):
         if readMatch[i] != "-":
             startPoint = i
             break
+    return startPoint
+
+def getEndPoint(readMatch, refMatch):
+    """
+    Figure out where the last symbol of interest in the read is.
+    """
+    endPoint = len(refMatch)
+    for i in range(0, len(refMatch)):
+        if readMatch[-1-i] != "-":
+            endPoint = len(refMatch) - i
+            break
+    return endPoint
+
+def endMatch(readMatch, refMatch, startPoint, endPoint):
+    """
+    Aligner errors arise when mutations are at the ends of the read rather than in the middle.
+    Trimming ends only shifts the problem. Instead require that read ends match the reference.
+    Return False if either end doesn't match
+    """
+
+    # does the start mismatch
+    start = readMatch[startPoint:startPoint + MATCH_N_END_SYMBOLS] == refMatch[startPoint:startPoint + MATCH_N_END_SYMBOLS]
+    # does the end mismatch
+    end = readMatch[endPoint - MATCH_N_END_SYMBOLS:endPoint] == refMatch[endPoint - MATCH_N_END_SYMBOLS:endPoint]
+    return start and end
+
+def alignStartPoint(startPoint):
+    """
+    Move start point to a triplet-aligned position
+    """
 
     # Zip forwards to the next multiple of 3...
     while (startPoint % 3 != 0):
@@ -155,6 +188,15 @@ def summarizeChanges(readMatch, refMatch):
 
     readMatch = cullEnds(readMatch)
     startPoint = getStartPoint(readMatch, refMatch)
+    endPoint = getEndPoint(readMatch, refMatch)
+
+    # Reject reads with errors at the ends
+    if not endMatch(readMatch, refMatch, startPoint, endPoint):
+        print("Rejected (ends misalign)")
+        return
+
+    # Shift start point to be triplet aligned
+    startPoint = alignStartPoint(startPoint)
 
     # Reject reads with gaps that aren't a multiple of 3 in length.
     gap = findGap(readMatch);
