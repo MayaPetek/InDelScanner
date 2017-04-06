@@ -35,7 +35,7 @@ IGNORE_LAST_N_SYMBOLS = 0;
 
 # Require N end symbol of the read to match reference. If there are mutations at the very end of a read, it is
 # impossible to tell what the real mutation was (substitution, misplaced InDel, combination)
-MATCH_N_END_SYMBOLS = 1;
+MATCH_N_END = 3;
 
 
 PRINT_COLOURED_DIFF = len(sys.argv) >= 3 and sys.argv[2] == "DEBUG";
@@ -71,6 +71,26 @@ def cullEnds(readMatch):
 
     return readMatch;
 
+
+def getChar(target, index):
+    """
+    Get a char from a string, or "-" if `index` is out of range.
+    """
+    if index < 0 or index >= len(target):
+        return "-";
+
+    return target[index];
+
+def getChars(target, index, n):
+    """
+    Get a sequence of `n` chars from `target` at `index`, safely, via `getChar`
+    """
+    out = ""
+    for i in range(0, n):
+        out += getChar(target, index + i);
+
+    return out;
+
 def getStartPoint(readMatch, refMatch):
     """
     Figure out where the first symbol of interest in the read is. This start point should be:
@@ -103,9 +123,9 @@ def endMatch(readMatch, refMatch, startPoint, endPoint):
     """
 
     # does the start mismatch
-    start = readMatch[startPoint:startPoint + MATCH_N_END_SYMBOLS] == refMatch[startPoint:startPoint + MATCH_N_END_SYMBOLS]
+    start = getChars(readMatch, startPoint, MATCH_N_END) == getChars(refMatch, startPoint, MATCH_N_END)
     # does the end mismatch
-    end = readMatch[endPoint - MATCH_N_END_SYMBOLS:endPoint] == refMatch[endPoint - MATCH_N_END_SYMBOLS:endPoint]
+    end = getChars(readMatch, endPoint - MATCH_N_END, MATCH_N_END) == getChars(refMatch, endPoint - MATCH_N_END, MATCH_N_END)
     return start and end
 
 def alignStartPoint(startPoint):
@@ -113,11 +133,30 @@ def alignStartPoint(startPoint):
     Move start point to a triplet-aligned position
     """
 
-    # Zip forwards to the next multiple of 3...
+    # Hop back to the last multiple of 3...
     while (startPoint % 3 != 0):
-        startPoint += 1
+        startPoint -= 1;
 
     return startPoint
+
+def copyFirstAcid(readMatch, refMatch, startPoint):
+    # Handle the first amino acid (which we might only partially have in the read. We don't want to report it
+    # as an error if some prefix is simply absent in the read.
+    expectedAcid = getChars(refMatch, startPoint, 3);
+    actualAcid = getChars(readMatch, startPoint, 3);
+
+    # Steal letters from expectedAcid to fill in the prefix of actualAcid...
+    for i in range(0, 3):
+        if actualAcid[i] != "-":
+            break;
+
+        # Change character i of actualAcid to match expectedAcid.
+        actualAcid = actualAcid[:i] + expectedAcid[i] + actualAcid[i + 1:]
+
+    # Correct the read
+    readMatch = readMatch[:startPoint] + actualAcid + readMatch[startPoint + 3:]
+
+    return readMatch
 
 def hasMultipleGaps(readMatch):
     """
@@ -195,8 +234,9 @@ def summarizeChanges(readMatch, refMatch):
         print("Rejected (ends misalign)")
         return
 
-    # Shift start point to be triplet aligned
+    # Copy first acid
     startPoint = alignStartPoint(startPoint)
+    readMatch = copyFirstAcid(readMatch, refMatch, startPoint)
 
     # Reject reads with gaps that aren't a multiple of 3 in length.
     gap = findGap(readMatch);
