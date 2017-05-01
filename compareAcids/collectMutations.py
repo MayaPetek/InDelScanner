@@ -16,10 +16,10 @@ def setupCodons():
     
     return codons
     
-def setupAminoAcids()
+def setupAminoAcids():
 
     acids = "FYC*WLPHQIMTNKSRVADEG"
-    acidList = list(acids)
+    aminoAcids = list(acids)
     
     return aminoAcids
 
@@ -32,9 +32,9 @@ def codonTable(codons):
     Base2  = TTTTCCCCAAAAGGGGTTTTCCCCAAAAGGGGTTTTCCCCAAAAGGGGTTTTCCCCAAAAGGGG
     Base3  = TCAGTCAGTCAGTCAGTCAGTCAGTCAGTCAGTCAGTCAGTCAGTCAGTCAGTCAGTCAGTCAG
     """
-
-    aminoAcids = 'FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG'
-    codonTable = dict(zip(codons, amino_acids))
+    codons.append("---")
+    aminoAcids = 'FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG-'
+    codonTable = dict(zip(codons, aminoAcids))
 
     return codonTable
     
@@ -45,44 +45,79 @@ def setupCounts(codons,aminoAcids):
     Each position carries a dictionary with counts for that position on DNA
     and/or protein level
     """
+    # add deletions to codon and amino acid lists
+    codons.append("---")
+    aminoAcids.append("-")
+    
     # GFP is 720 nt long, barcodes extend further - for now make it longer
-    countsDNA = [{triplet: 0 for triplet in codons} for k in range(798, step=3)]
-    countsProtein = [{acid: 0 for triplet in aminoAcids} for k in range(250)]    
-    return [countsDNA, countsProtein]
-
+    countsDNA = [{triplet: 0 for triplet in codons} for k in range(250)]
+    countsProtein = [{acid: 0 for acid in aminoAcids} for k in range(250)]   
+     
+    return countsDNA, countsProtein
+    
 def translate(triplet):
 # translate triplet DNA to protein according to standard code
 
     protein = codonTable.get(triplet)
     return protein
 
+def containsMutation(codonLine):
+    """
+    Check if the mutation is Rejected or an empty line
+    """
+    return codonLine[0].isnumeric()
+       
+def classify(codonLine, codons):
+    """
+    Check for a valid mutation and add appropriate counter to point mutations.
+    Currently ignores linked mutations.
+    """
+    if not containsMutation(codonLine):
+        return "Rejected"
+    
+    
+    if len(codonLine) == 4:
+    # a single amino acid change
+        # see if it's a valid mutation
+        if (codonLine[1] or codonLine[3]) not in codons:
+            return "Invalid mutation"
+        else:
+        # a substitution/deletion of the form: [index, triplet, ->, after]
+            return "Point"
+    else:
+        return None
 
-def classify(codonMutation):
 
-    if "Rejected" in codonMutation:
-        break
-    elif len(codonMutation) == 4 and "---" not in codonMutation
-        # this is a single triplet subsitution
-        
-        
-def getPosition()
+"""
+Count mutations into a large table
+"""
+codons = setupCodons()
+codonTable = codonTable(codons)
+aminoAcids = setupAminoAcids()
 
-def count()
+countsDNA, countsProtein = setupCounts(codons,aminoAcids)
 
-
-
-
-# put everything together
-
-codonTable = setupCodons()
+rejected = 0
+invalid = 0
 
 with open(sys.argv[1]) as f:
-        
-        while (True):
-            # Read the next mutation description
-            codonMutation = f.readline().rstrip().split()
-            # Did we run out of file?
-                if codonMutation == "":
-                break;
+    for line in f:
+        # ignore empty lines
+        if not line.isspace():
+            codonLine = line.rstrip().rstrip(";").split()
+            if classify(codonLine, codons) == "Point":
+                index = int( int(codonLine[0]) / 3)
+                countsDNA[index][codonLine[3]] += 1
+                countsProtein[index][translate(codonLine[3])] += 1
+            elif classify(codonLine, codons) == "Invalid mutation":
+                invalid += 1
+            elif classify(codonLine, codons) == "Rejected":
+                rejected +=1
+            else:
+                pass
 
-            # do other stuff
+# give results
+print("Previously rejected mutations: ", rejected)
+print("Invalid mutations, e.g. -TT: ", invalid)
+print("List of triplet counts for valid mutations:\n", countsDNA)
+print("List of amino acid counts for valid mutations:\n", countsProtein)
