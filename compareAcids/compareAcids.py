@@ -15,31 +15,36 @@ from outputUtils import printErrors
 # Count ones with non-multiple of 3 gaps
 # Steal symbols across %3 gaps to align gaps and stuff.
 # Also output the gap size.
-# Reject if more than one gap.
+# Reject if more than one gap. This happens rarely and only when the alignment is irredeemably broken.
 
-# If more than this many errors are found, we "reject" a read as being too broken.
-# TODO: Most of these are when something like this happens:
-# ------------TTCAAAATTCGCCACAACATTGAAGATGGATCCGTTCAACTAGCAGAC
-# CATTATCAACAAAATACTCCAATTGGC---------------------------------
-# ------------------------------------------------------------
-# -----------------------------------------------------------C
-# You can probably tweak the parameters of mafft to stop it from doing this, improving
-# your data!
+MAX_ERRORS = 5;
 
-MAX_ERRORS = 10;
 
 # Overwrite this many symbols at the start/end of the read string with "-". This apparently helps work around
 # some flavours of aligner unreliability.
+
 IGNORE_FIRST_N_SYMBOLS = 0;
 IGNORE_LAST_N_SYMBOLS = 0;
 
 # Require N end symbol of the read to match reference. If there are mutations at the very end of a read, it is
 # impossible to tell what the real mutation was (substitution, misplaced InDel, combination)
+# Matching 2 letters should be sufficient for alignment quality, 3 is a more cautious choice
+# Matching 3 prevents problems with letter stealing
+
 MATCH_N_END = 3;
 
+PRINT_COLOURED_DIFF = len(sys.argv) >= 4 and sys.argv[3] == "DEBUG";
 
-PRINT_COLOURED_DIFF = len(sys.argv) >= 3 and sys.argv[2] == "DEBUG";
-
+def readReference():
+    """
+    Read sequence from fasta file and add Ns at the end
+    """
+    with open(sys.argv[2]) as f:
+    # Discard the first line of the file.
+        f.readline()
+        reference = f.readline().rstrip() + 45*"N"
+        reference = [reference[i:i+3] for i in range(0, len(reference), 3)]
+        return reference
 
 def readUntil(f, sentinel):
     """
@@ -193,8 +198,61 @@ def gapAlign(readMatch, gap):
 
     return readMatch
 
+def setupCodonsAminoAcids():
 
-def summarizeChanges(readMatch, refMatch):
+    bases = ['T', 'C', 'A', 'G']
+    codons = [a+b+c for a in bases for b in bases for c in bases]
+    codons.append("---")
+    aminoAcids = list("FYC*WLPHQIMTNKSRVADEG-")
+    
+    return codons, aminoAcids
+    
+
+def codonTable(codons):
+    """
+    generate codon table, derived from NCBI standard code
+
+    AAs  = FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG
+    Base1  = TTTTTTTTTTTTTTTTCCCCCCCCCCCCCCCCAAAAAAAAAAAAAAAAGGGGGGGGGGGGGGGG
+    Base2  = TTTTCCCCAAAAGGGGTTTTCCCCAAAAGGGGTTTTCCCCAAAAGGGGTTTTCCCCAAAAGGGG
+    Base3  = TCAGTCAGTCAGTCAGTCAGTCAGTCAGTCAGTCAGTCAGTCAGTCAGTCAGTCAGTCAGTCAG
+    """
+
+    acids = 'FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG-'
+    codonTable = dict(zip(codons, acids))
+
+    return codonTable
+    
+def setupCounts(codons,aminoAcids):
+    """
+    All mutations are counted into a list of dictionaries, one for each position
+    Each position carries a dictionary with counts for that position on DNA
+    and/or protein level
+    """
+   
+    # GFP is 720 nt long, barcodes extend further - for now make it longer
+    countsDNA = [{triplet: 0 for triplet in codons} for k in range(len(reference))]
+    countsProtein = [{acid: 0 for acid in aminoAcids} for k in range(len(reference))]   
+     
+    return countsDNA, countsProtein
+    
+def classify(errors, codons):
+    """
+    Check for a valid mutation and add appropriate counter to point mutations.
+    Currently ignores linked mutations.
+    """
+    if len(errors) == 1:
+    # a single amino acid change
+        # see if it's a valid mutation
+        if (errors[0].get('expected') not in codons) or (errors[0].get('actual') not in codons):
+            return "Invalid mutation"
+        #elif errors[0].get('actual') == "---" :
+        # a deletion of the form: [index, triplet, after]
+            #return "Point deletion"
+        else:
+            return "Point"
+
+def summarizeChanges(readMatch, refMatch, codonTable, countsDNA, countsProtein, codons):
     """
     Print out the ammino acid changes for a read.
     """
@@ -267,11 +325,21 @@ def summarizeChanges(readMatch, refMatch):
     if len(errors) > MAX_ERRORS:
         print("Rejected (errcount)");
     else:
-        printErrors(errors, readMatch, refMatch, PRINT_COLOURED_DIFF);
+        printErrors(errors, readMatch, refMatch, PRINT_COLOURED_DIFF)
+        if classify(errors, codons) == "Point":
+            index = int( int(errors[0].get('position')) / 3)
+            countsDNA[index][errors[0].get('actual')] += 1
+            countsProtein[index][codonTable.get(errors[0].get('actual'))] += 1
 
 
 # Analyze the output of `pairwiseCheck.sh`, emitting a handy summary of ammino acid changes.
 ctr = 0
+
+reference = readReference()
+codons, aminoAcids = setupCodonsAminoAcids()
+codonTable = codonTable(codons)
+countsDNA, countsProtein = setupCounts(codons,aminoAcids)
+
 with open(sys.argv[1]) as f:
     # Discard the first line of the file.
     f.readline();
@@ -283,7 +351,7 @@ with open(sys.argv[1]) as f:
 
         # Read the read and reference blocks for the next one...
         refMatch = readUntil(f, ">");
-        readMatch = readUntil(f, ">Reference");
+        readMatch = readUntil(f, ">Reference")
 
         assert(len(refMatch) == len(readMatch));
 
@@ -291,6 +359,26 @@ with open(sys.argv[1]) as f:
         if readMatch == "":
             break;
 
-        summarizeChanges(readMatch, refMatch);
+        summarizeChanges(readMatch, refMatch, codonTable, countsDNA, countsProtein, codons)
 
         ctr += 1;
+
+inputName = str(sys.argv[1]).rstrip(".aln")
+
+with open(inputName + ".DNAcounts", "w") as outputDNA:
+    # write counts to file
+    print("# POSITION WT", ' '.join(codons), file = outputDNA)
+    for position in range(len(countsDNA)):
+        values = [position+1, reference[position]]
+        for triplet in codons:
+            values.append(str(countsDNA[position].get(triplet)))
+        print(' '.join(str(entry) for entry in values), file = outputDNA)  
+
+with open(inputName + ".ProteinCounts", "w") as outputProtein:
+    # write counts to file
+    print("# POSITION ", ' '.join(aminoAcids), file = outputProtein)
+    for position in range(len(countsProtein)):
+        values = [position+1, codonTable.get(reference[position])]
+        for aminoacid in aminoAcids:
+            values.append(str(countsProtein[position].get(aminoacid)))
+        print(' '.join(str(entry) for entry in values), file = outputProtein)  
