@@ -41,10 +41,10 @@ def readReference():
     """
     with open(sys.argv[2]) as f:
     # Discard the first line of the file.
-        f.readline()
-        reference = f.readline().rstrip() + 45*"N"
-        reference = [reference[i:i+3] for i in range(0, len(reference), 3)]
-        return reference
+        referenceName = f.readline().rstrip()
+        referenceSequence = f.readline().rstrip().upper() + 45*"N"
+        referenceSequence = [referenceSequence[i:i+3] for i in range(0, len(referenceSequence), 3)]
+        return referenceName, referenceSequence
 
 def readUntil(f, sentinel):
     """
@@ -108,9 +108,9 @@ def endMatch(readMatch, refMatch, startPoint, endPoint):
     """
 
     # does the start mismatch
-    start = getChars(readMatch, startPoint, MATCH_N_END) == getChars(refMatch, startPoint, MATCH_N_END)
+    start = getChars(readMatch, startPoint, MATCH_N_END).casefold() == getChars(refMatch, startPoint, MATCH_N_END).casefold()
     # does the end mismatch
-    end = getChars(readMatch, endPoint - MATCH_N_END, MATCH_N_END) == getChars(refMatch, endPoint - MATCH_N_END, MATCH_N_END)
+    end = getChars(readMatch, endPoint - MATCH_N_END, MATCH_N_END).casefold() == getChars(refMatch, endPoint - MATCH_N_END, MATCH_N_END).casefold()
     return start and end
 
 def alignStartPoint(startPoint):
@@ -231,26 +231,86 @@ def setupCounts(codons,aminoAcids):
     """
    
     # GFP is 720 nt long, barcodes extend further - for now make it longer
-    countsDNA = [{triplet: 0 for triplet in codons} for k in range(len(reference))]
-    countsProtein = [{acid: 0 for acid in aminoAcids} for k in range(len(reference))]   
+    countsDNA = [{triplet: 0 for triplet in codons} for k in range(len(referenceSequence))]
+    countsProtein = [{acid: 0 for acid in aminoAcids} for k in range(len(referenceSequence))]   
      
     return countsDNA, countsProtein
+
+def classifyPoint(mutation, codons):
+    # each mutation is a dictionary with keys 'position', 'expected' and 'actual'
+    if (mutation.get('expected') not in codons) or (mutation.get('actual') not in codons):
+        return None
+    elif mutation.get('actual') == "---":
+        return "---"
+    elif mutation.get('expected') == "---":
+        return "INS"
+    else:
+        return "NNN"
     
 def classify(errors, codons):
     """
     Check for a valid mutation and add appropriate counter to point mutations.
     Currently ignores linked mutations.
-    """
-    if len(errors) == 1:
-    # a single amino acid change
-        # see if it's a valid mutation
-        if (errors[0].get('expected') not in codons) or (errors[0].get('actual') not in codons):
+    """    
+    for mutation in errors:
+        if not classifyPoint(mutation, codons):
             return "Invalid mutation"
-        #elif errors[0].get('actual') == "---" :
-        # a deletion of the form: [index, triplet, after]
-            #return "Point deletion"
-        else:
-            return "Point"
+    
+    # check that mutations are sequential
+    actualPositions = [errors[n].get('position') for n in range(len(errors))]
+    expectedPositions = [actualPositions[n] + 3*n for n in range(len(actualPositions))]
+    if not actualPositions == expectedPositions:
+        return "Non sequential"
+    
+    # classify each point mutation and add up the results
+    # eg. "NNN ---" is substitution followed by deletion
+    mutationTypes = []
+    for mutation in errors:
+        mutationTypes.append(classifyPoint(mutation, codons))
+
+    return ' '.join(mutationTypes)
+    """ 
+    if len(errors) == 1:
+        return "Point " + classifyPoint(errors[0], codons)
+       
+    elif len(errors) == 2:
+        if (classifyPoint(errors[0],codons) == "substitution" and
+                classifyPoint(errors[1],codons) == "substitution" and
+                errors[1].get('position') = errors[0].get['position'] + 3
+            return "NNN NNN"
+        if (classifyPoint(errors[0],codons) == "substitution" and
+                classifyPoint(errors[0],codons) == "deletion" and
+                errors[1].get('position') = errors[0].get['position'] + 3
+            return "NNN ---"
+        if (classifyPoint(errors[0],codons) == "deletion" and
+                classifyPoint(errors[0],codons) == "deletion" and
+                errors[1].get('position') = errors[0].get['position'] + 3
+            return "--- ---"
+
+    elif len(errors) == 3:
+        if (classifyPoint(errors[0],codons) == "substitution" and
+                classifyPoint(errors[1],codons) == "deletion" and
+                classifyPoint(errors[2],codons) == "deletion" and
+                errors[1].get('position') = errors[0].get['position'] + 3 and
+                errors[2].get('position') = errors[1].get['position'] + 3
+            return "Substitution + two c deletion"
+        if (classifyPoint(errors[0],codons) == "deletion" and
+                classifyPoint(errors[1],codons) == "deletion" and
+                classifyPoint(errors[2],codons) == "deletion" and
+                errors[1].get('position') = errors[0].get['position'] + 3 and
+                errors[2].get('position') = errors[1].get['position'] + 3
+            return "Substitution + two triplet deletion"
+
+    elif len(errors) == 4:
+        if (classifyPoint(errors[0],codons) == "substitution" and
+                classifyPoint(errors[1],codons) == "deletion" and
+                classifyPoint(errors[2],codons) == "deletion" and
+                classifyPoint(errors[3],codons) == "deletion" and
+                errors[1].get('position') = errors[0].get['position'] + 3 and
+                errors[2].get('position') = errors[1].get['position'] + 3
+                errors[3].get('position') = errors[2].get['position'] + 3
+            return "Substitution + three triplet deletion"
+        """
 
 def summarizeChanges(readMatch, refMatch, codonTable, countsDNA, countsProtein, codons):
     """
@@ -326,7 +386,7 @@ def summarizeChanges(readMatch, refMatch, codonTable, countsDNA, countsProtein, 
         print("Rejected (errcount)");
     else:
         printErrors(errors, readMatch, refMatch, PRINT_COLOURED_DIFF)
-        if classify(errors, codons) == "Point":
+        if classify(errors, codons) in ["NNN", "---"]:
             index = int( int(errors[0].get('position')) / 3)
             countsDNA[index][errors[0].get('actual')] += 1
             countsProtein[index][codonTable.get(errors[0].get('actual'))] += 1
@@ -335,7 +395,7 @@ def summarizeChanges(readMatch, refMatch, codonTable, countsDNA, countsProtein, 
 # Analyze the output of `pairwiseCheck.sh`, emitting a handy summary of ammino acid changes.
 ctr = 0
 
-reference = readReference()
+referenceName, referenceSequence = readReference()
 codons, aminoAcids = setupCodonsAminoAcids()
 codonTable = codonTable(codons)
 countsDNA, countsProtein = setupCounts(codons,aminoAcids)
@@ -350,8 +410,8 @@ with open(sys.argv[1]) as f:
             print("Read: %i \n" % ctr);
 
         # Read the read and reference blocks for the next one...
-        refMatch = readUntil(f, ">");
-        readMatch = readUntil(f, ">Reference")
+        refMatch = readUntil(f, ">")
+        readMatch = readUntil(f, referenceName)
 
         assert(len(refMatch) == len(readMatch));
 
@@ -369,7 +429,7 @@ with open(inputName + ".DNAcounts", "w") as outputDNA:
     # write counts to file
     print("# POSITION WT", ' '.join(codons), file = outputDNA)
     for position in range(len(countsDNA)):
-        values = [position+1, reference[position]]
+        values = [position+1, referenceSequence[position]]
         for triplet in codons:
             values.append(str(countsDNA[position].get(triplet)))
         print(' '.join(str(entry) for entry in values), file = outputDNA)  
@@ -378,7 +438,7 @@ with open(inputName + ".ProteinCounts", "w") as outputProtein:
     # write counts to file
     print("# POSITION ", ' '.join(aminoAcids), file = outputProtein)
     for position in range(len(countsProtein)):
-        values = [position+1, codonTable.get(reference[position])]
+        values = [position+1, codonTable.get(referenceSequence[position])]
         for aminoacid in aminoAcids:
             values.append(str(countsProtein[position].get(aminoacid)))
         print(' '.join(str(entry) for entry in values), file = outputProtein)  
