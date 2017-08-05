@@ -11,7 +11,7 @@ def getChar(target, index):
     if index < 0 or index >= len(target):
         return "-";
 
-    return target[index];
+    return target[index]
 
 def getChars(target, index, n):
     """

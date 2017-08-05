@@ -81,11 +81,9 @@ def classify(codonLine, codons):
         # see if it's a valid mutation
         if (codonLine[1] or codonLine[3]) not in codons:
             return "Invalid mutation"
-        else:
+        elif :
         # a substitution/deletion of the form: [index, triplet, ->, after]
             return "Point"
-    else:
-        return None
 
 
 """
