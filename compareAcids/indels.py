@@ -1,17 +1,10 @@
 #!/usr/bin/python3
 
-"""
-Arguments:
-1.   Alignment of sequencing reads to a reference sequence in FASTA format. The
-     reference comes before read sequence. (>Ref, seq, >Read, seq).
-2.   Reference sequence in FASTA format. Same file that was used to create the 
-     alignment, in particular the reference name here needs to match reference
-     name in the alignment.
-(3.) Optional: DEBUG print a coloured representation of mismatches
-"""
-
 import sys
 import re
+import time
+import argparse
+
 from pprint import pprint
 from collections import defaultdict
 
@@ -25,14 +18,34 @@ from Bio import SeqIO, AlignIO
 from Bio.Alphabet import IUPAC
 from Bio.Data import CodonTable
 
+
 # Demand Python 3.
 if sys.version_info[0] < 3:
     print ("Python 3 is required, but you are using Python %i.%i.%i") % (
            sys.version_info[0], sys.version_info[1], sys.version_info[2])
     sys.exit(1)
 
+
+"""
+Arguments:
+1.   Alignment of sequencing reads to a reference sequence in FASTA format. The
+     reference comes before read sequence. (>Ref, seq, >Read, seq).
+2.   Reference sequence in FASTA format. Same file that was used to create the 
+     alignment, in particular the reference name here needs to match reference
+     name in the alignment.
+3.   Name of output file
+(4.) Optional: DEBUG print a coloured representation of mismatches
+"""
+parser = argparse.ArgumentParser(description='A script to find and counts all 3 bp substitutions and 3/6/9 bp deletions in a gene from a multiple alignment')
+parser.add_argument('-a','--alignment', help='Multiple sequence alignment',required=True)
+parser.add_argument('-r','--reference', help='Reference fasta file with with the alignment was constructed', required=True)
+parser.add_argument('-o','--output',help='Output file name', required=True)
+parser.add_argument('-d','--debug', help='Turn on debugging', required=False, action="store_true")
+args = parser.parse_args()
+
+
 # Visual representation of how reads match reference
-PRINT_COLOURED_DIFF = len(sys.argv) >= 4 and sys.argv[3] == "DEBUG"
+PRINT_COLOURED_DIFF = args.debug
 
 # max number of mutations called in a read
 MAX_ERRORS = 4
@@ -42,7 +55,8 @@ MAX_ERRORS = 4
 #   repositioning
 # - 3 also simplifies handling the first codon: it's either complete or it's OK
 #   to move 1 or 2 bases over to the next triplet
-MATCH_N_END = 3 
+MATCH_N_END = 3
+
 
 def findEnds(read, ref):
     """
@@ -121,20 +135,22 @@ def gapAlign(read, gap):
     if gap is None:
         return read
         
+    movingGap = (gap[0], gap[1])
+        
     # Shift letters from the end to the start...
-    while gap[0] % 3 != 0:
-        assert(read[gap[0]] == "-")
+    while movingGap[0] % 3 != 0:
+        assert(read[movingGap[0]] == "-")
 
         # This means we ran out of symbols to steal before we managed to align.
         # This indicates a gap at the end, and one we can't fix. Reject!
-        if read[gap[1]] == "-":
+        if read[movingGap[1]] == "-":
             return None
         
-        read[gap[0]] = read[gap[1]]
-        read[gap[1]] = "-"
+        read[movingGap[0]] = read[movingGap[1]]
+        read[movingGap[1]] = "-"
 
         # Shift the gap to the right...
-        gap = (gap[0] + 1, gap[1] + 1)
+        movingGap = (movingGap[0] + 1, movingGap[1] + 1)
       
     return read
 
@@ -173,20 +189,24 @@ def findErrors(read, ref, rejected):
     being part of an insertion error, until we reach the point where all remaining symbols in read are
     # "-" (at which point we are finished).
     """
-
+    
+   
     # Perform letter-stealing across the gap (if any). The resulting modified read will be ready for naive
     # triplet-wise comparison.
-
-    gap = findGap(read)
+    
     ends = findEnds(read, ref)
+    gap = findGap(read)
+
+    if gap is None:
+        errors = ["Sub"]
+    else:
+        errors = [str(gap[0]+1)]
 
     read = gapAlign(read, gap)
     
     if read is None:
         rejected['unalignable ends'] +=1
         return
-
-    errors = []
     
     for i in range(ends.get("aligned"), ends.get("end"), 3):
         # Check if we've run out of symbols (the rest of the string is just dashes).
@@ -203,10 +223,10 @@ def findErrors(read, ref, rejected):
         if re.search('[ATGC]', suffix) is None and "-" in actualCodon:
             continue
 
-        # Compare the triplets!
+        # Compare the triplets! Use 1-based counting for biologists.
         if expectedCodon != actualCodon:
-            errors.extend([str(i), expectedCodon, actualCodon])
-               
+            errors.extend([str(i+1), expectedCodon, actualCodon])
+              
     return errors
 
 
@@ -234,23 +254,22 @@ def prepareCounts(reference):
                                reference.alphabet)
             if verifyRead(possibleread, reference, tmp) is None:
                 continue   
-            gap = findGap(possibleread)
-            ends = findEnds(possibleread, reference)
-            possibleread  = gapAlign(possibleread, gap)
-            errors = findErrors(possibleread, reference, ends)
+            errors = findErrors(possibleread, reference, tmp)
+            if errors == ["Sub"]:
+                continue            
             validDels.append(tuple(errors))
             
     for i in range(0, len(reference) - 3,3):
         for triplet in codons:
-            s1 = (str(i), getChars(ref,i,3), triplet)
-            s2 = (str(i), ref[i:i+3], ref[i]+triplet[:2], str(i+3),
+            s1 = ("Sub", str(i), getChars(ref,i,3), triplet)
+            s2 = ("Sub", str(i), ref[i:i+3], ref[i]+triplet[:2], str(i+3),
                   ref[i+3:i+6], triplet[2:]+ref[i+4:i+6])
-            s3 = (str(i), ref[i:i+3], ref[i:i+2]+triplet[:1], str(i+3),
+            s3 = ("Sub", str(i), ref[i:i+3], ref[i:i+2]+triplet[:1], str(i+3),
                   ref[i+3:i+6], triplet[1:]+ref[i+5])           
             validSubs.extend((s1,s2,s3))
            
             
-    # now rejected already has some positive counts, throw them away
+    # tmp collected some rejected counts, now start fresh
     rejected = defaultdict(int)
     
     for key in tmp:
@@ -258,7 +277,12 @@ def prepareCounts(reference):
     
     return validDels, validSubs, rejected
 
-
+def printDiff(errors, read, ref, ctr, PRINT_COLOURED_DIFF):
+    print("\n\n#############################################################################")
+    print("Read: %i \n" % ctr)
+    printErrors(errors, read, ref, PRINT_COLOURED_DIFF)
+    
+    
 def main():
     """
     1. Read reference file
@@ -269,59 +293,90 @@ def main():
         - add to count table
     4. Print counts
     """
-    reference = SeqIO.read(sys.argv[2],'fasta', alphabet = IUPAC.ambiguous_dna).seq.upper()
+    time_0 = time.time()
+    
+    reference = SeqIO.read(args.reference,'fasta', alphabet = IUPAC.ambiguous_dna).seq.upper()
 
     validDels, validSubs, rejected = prepareCounts(reference)
     allcounts = defaultdict(int)
     
-    print("Ready to deal with alignment")
+    time_1 = time.time()
+    
+    print("Completed setting up counts in", (time_1 - time_0) // 60, "min and", (time_1 - time_0) % 60, "s")
        
     read = None
     ref = None
     
-    ctr=1 # counter for DEBUG printing
+    ctr=0 # counter for DEBUG printing
     
     # reading & looping over read/reference sequence in multiple sequence alignment
     # use AlignIO parser and keep sequence only, allowing it to change (important for gap shifts) 
-    for pair in AlignIO.parse(sys.argv[1],"fasta", alphabet = IUPAC.ambiguous_dna, seq_count = 2):
-        if PRINT_COLOURED_DIFF:
-            print("\n\n#############################################################################")
-            print("Read: %i \n" % ctr)
-            
+    for pair in AlignIO.parse(args.alignment,"fasta", alphabet = IUPAC.ambiguous_dna, seq_count = 2):
+
+        ctr += 1
+        errors = []
+                   
         ref = pair[0].seq.tomutable()
         read = pair[1].seq.tomutable()
+       
         
         # is the read broken?
         if verifyRead(read, ref, rejected) == None:
+            if PRINT_COLOURED_DIFF:
+                printDiff(errors, read, ref, ctr, PRINT_COLOURED_DIFF)
             continue
 
-        gap = findGap(read)
-        ends = findEnds(read, ref)
-        read  = gapAlign(read, gap)
-            
-        errors = findErrors(read, ref, ends)
+        errors = findErrors(read, ref, rejected)
 
         if (len(errors)/3) > MAX_ERRORS:
             rejected['too many errors'] +=1
+            if PRINT_COLOURED_DIFF:
+                printDiff(errors, read, ref, ctr, PRINT_COLOURED_DIFF)
             
         # count up all errors in one massive dictionary
         elif len(errors) > 0:
             allcounts[tuple(errors)] += 1
          
-        ctr += 1
+
+    
+    time_2 = time.time()
+    print("Completed processing reads in", (time_2 - time_1) // 60, "min and", (time_2 - time_1) % 60, "s")
         
     # once all counts are done, filter out deletions & substitutions
+        
     delcounts = {key:value for (key, value) in allcounts.items()
                 if (key in validDels) and value > 0}
 
     subcounts = {key:value for (key, value) in allcounts.items()
                 if (key in validSubs) and value > 0}
-            
-    pprint(rejected)
-    pprint(delcounts)
-    pprint(subcounts)
-    
-    return
 
+    time_3 = time.time()
+    print("Extracted interesting mutations in", (time_3 - time_2) // 60, "min and", (time_3 - time_2) % 60, "s")
+
+
+    # Print everything interesting to output
+    
+    with open(args.output + ".csv", "w") as output:
+        print("Rejected", file = output)
+        for (key, value) in rejected.items():
+            print(key, value, sep=",", file = output)
+        print("Substitutions", file = output)
+        for (key, value) in subcounts.items():
+            print(' '.join(key), value, sep=",", file = output)
+        print("Deletions", file = output)
+        for (key, value) in delcounts.items():
+            print(' '.join(key), value, sep=",", file = output)
+
+    with open(args.output + ".all.csv", "w") as output:
+        for (key, value) in allcounts.items():
+            print(' '.join(key), value, sep=",", file = output)
+    
+    with open(args.output + ".d3transposon.csv", "w") as output:
+        for (key, value) in delcounts.items():
+            if key.count('---') == 1:
+                print(key[0], value, sep=",", file = output)    
+      
+    time_4 = time.time()
+    print("Printed results in", (time_4 - time_3) // 60, "min and", (time_4 - time_3) % 60, "s")    
 
 main()
