@@ -5,20 +5,22 @@ with actually solving the problem.
 
 from termcolor import colored
 
-def printErrors(errors, readMatch, refMatch, colouredDiff):
+def printErrors(errors, read, ref, colouredDiff):
     """
     Output the errors for this read. Either as a coloured diff, or in a text summary.
 
     @param errors A list of error objects.
-    @param readMatch The read, post-alignment.
-    @param refMatch The reference, post-alignment.
+    @param read The read, post-alignment, a Seq object.
+    @param ref The reference, post-alignment, a Seq object..
     @param colouredDiff If true, will print a fancy coloured diff instead of a concise error summary.
     """
-    for e in errors:
-        print("%s %s -> %s; " % (e['position'], e['expected'], e['actual']), end='');
-
-    print()
-
+    #for e in errors:
+    #    print("%s %s > %s " % (e['position'], e['expected'], e['actual']), end='');
+    
+    errors = list(errors)
+    errors = ' '.join(errors)
+    print(errors)
+    
     if colouredDiff:
         print()
         # Print a coloured diff :D
@@ -30,12 +32,12 @@ def printErrors(errors, readMatch, refMatch, colouredDiff):
         print()
         print("|...." * 20);
 
-        for i in range(0, len(refMatch)):
+        for i in range(0, len(ref)):
             if i > 0 and i % 100 == 0:
                 print(); # Add a newline after each 100 symbols.
 
-            refChar = refMatch[i];
-            readChar = readMatch[i];
+            refChar = str(ref)[i];
+            readChar = str(read)[i];
 
             if refChar != "-":
                 if refChar == readChar:
@@ -46,4 +48,6 @@ def printErrors(errors, readMatch, refMatch, colouredDiff):
                 else:
                     print(refChar, end='');
             else:
-                print(colored(readChar, 'red'), end='');
+                print(colored(readChar, 'blue'), end='');
+                
+        print()
