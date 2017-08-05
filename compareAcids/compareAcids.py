@@ -17,7 +17,7 @@ from outputUtils import printErrors
 # Also output the gap size.
 # Reject if more than one gap. This happens rarely and only when the alignment is irredeemably broken.
 
-MAX_ERRORS = 5;
+MAX_ERRORS = 15
 
 
 # Overwrite this many symbols at the start/end of the read string with "-". This apparently helps work around
@@ -42,9 +42,10 @@ def readReference():
     with open(sys.argv[2]) as f:
     # Discard the first line of the file.
         referenceName = f.readline().rstrip()
-        referenceSequence = f.readline().rstrip().upper() + 45*"N"
+        referenceSequence = f.readline().rstrip().upper()
         referenceSequence = [referenceSequence[i:i+3] for i in range(0, len(referenceSequence), 3)]
-        return referenceName, referenceSequence
+        referenceProtein = [codonTable.get(triplet) for triplet in referenceSequence]
+        return referenceName, referenceSequence, referenceProtein
 
 def readUntil(f, sentinel):
     """
@@ -307,7 +308,7 @@ def summarizeChanges(readMatch, refMatch, codonTable, countsDNA, countsProtein, 
         gapSize = (gap[1] - gap[0])
 
         if gapSize % 3 != 0:
-            print("Rejected (gap of size %i)" % gapSize);
+            print("Rejected (gap of size %i)" % gapSize)
             return
 
         # Perform letter-stealing across the gap (if any). The resulting modified read will be ready for naive
@@ -349,10 +350,8 @@ def summarizeChanges(readMatch, refMatch, codonTable, countsDNA, countsProtein, 
 
     if len(errors) > MAX_ERRORS:
         print("Rejected (errcount)");
-    else:
+    elif len(errors) > 0:
         printErrors(errors, readMatch, refMatch, PRINT_COLOURED_DIFF)
-        
-        # Add the counts
         index = int( int(errors[0].get('position')) / 3)
         if classify(errors, codons) in mutations:
             countsTotal[index][classify(errors, codons)] += 1
@@ -376,9 +375,11 @@ def printCounts(inputFileName, referenceSequence, countsList, mutationNames, out
 # Analyze the output of `pairwiseCheck.sh`, emitting a handy summary of ammino acid changes.
 ctr = 0
 
-referenceName, referenceSequence = readReference()
 codons, aminoAcids = setupCodonsAminoAcids()
 codonTable = codonTable(codons)
+
+referenceName, referenceSequence, referenceProtein = readReference()
+
 mutations = ['NNN', '---', 'NNN---', 'NNNNNN','------', '---------','NNN------', 'NNN---------'] 
 
 countsDNA, countsProtein, countsTotal = setupCounts(codons,aminoAcids, mutations)
@@ -407,7 +408,8 @@ with open(sys.argv[1]) as f:
         ctr += 1;
 
 inputFileName = str(sys.argv[1]).rstrip(".aln")
-
+"""
 printCounts(inputFileName, referenceSequence, countsDNA, codons, "countsDNA")
-printCounts(inputFileName, referenceSequence, countsProtein, aminoAcids, "countsProtein")
+printCounts(inputFileName, referenceProtein, countsProtein, aminoAcids, "countsProtein")
 printCounts(inputFileName, referenceSequence, countsTotal, mutations, "countsTotal")
+"""
