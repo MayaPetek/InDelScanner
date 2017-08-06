@@ -51,3 +51,8 @@ def printErrors(errors, read, ref, colouredDiff):
                 print(colored(readChar, 'blue'), end='');
                 
         print()
+
+def printDiff(errors, read, ref, ctr, PRINT_COLOURED_DIFF):
+    print("\n\n#############################################################################")
+    print("Read: %i \n" % ctr)
+    printErrors(errors, read, ref, PRINT_COLOURED_DIFF)
