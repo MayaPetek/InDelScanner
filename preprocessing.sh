@@ -1,5 +1,6 @@
 #!/bin/bash
 
+# example input: $acids/preprocessing.sh f.fastq r.fastq ../references/eGFP test
 forwardReads="$1"
 reverseReads="$2"
 referenceFileBase="$3"
