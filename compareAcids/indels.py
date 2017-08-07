@@ -1,16 +1,14 @@
 #!/usr/bin/python3
 
 import sys
-
-import time
+import pickle
 import argparse
 
 from collections import defaultdict
 
-from functions import loadCounts
+from functions import loadCounts, prepareCounts, findErrors, verifyRead
+from outputUtils import printDiff
 
-from Bio.Seq import Seq, MutableSeq
-from Bio.SeqRecord import SeqRecord
 from Bio import SeqIO, AlignIO
 from Bio.Alphabet import IUPAC
 from Bio.Data import CodonTable
@@ -32,21 +30,22 @@ def countOneAlignment():
             sys.version_info[0], sys.version_info[1], sys.version_info[2])
         sys.exit(1)
 
+    codons = list(CodonTable.unambiguous_dna_by_name["Standard"].forward_table.keys())
+    codons += CodonTable.unambiguous_dna_by_name["Standard"].stop_codons
 
-    reference = SeqIO.read(args.reference,'fasta', alphabet = IUPAC.ambiguous_dna)
+    reference = SeqIO.read(args.reference,'fasta', alphabet=IUPAC.ambiguous_dna)
 
     try:
         valid_counts = loadCounts(reference)
+        print("Imported counts")
     except IOError:
         print("Making counts")
         valid_counts = prepareCounts(reference)
+        raise
 
     all_counts = defaultdict(int)
-    rejected = defaultdict()
+    rejected = defaultdict(int)
 
-    read = None
-    ref = None
-    
     ctr=0 # counter for DEBUG printing
     
     # reading & looping over read/reference sequence in multiple sequence alignment
@@ -58,54 +57,27 @@ def countOneAlignment():
         ref = pair[0].seq.tomutable()
         read = pair[1].seq.tomutable()
        
-        
-        # is the read broken?
-        if verifyRead(read, ref, rejected) == None:
-            if PRINT_COLOURED_DIFF:
-                printDiff(errors, read, ref, ctr, PRINT_COLOURED_DIFF)
-            continue
+        errors = findErrors(read, ref, rejected, codons) # errors = a tuple
 
-        errors = findErrors(read, ref, rejected)
-        assert errors
+        # is the read broken?
+        if not verifyRead(read, ref, rejected, MATCH_N_END):
+            if args.debug:
+                printDiff(errors, read, ref, ctr, args.debug)
+            continue
 
         if (len(errors) // 3) > MAX_ERRORS: # len(errors) = 1, 4, 7,...
             rejected['too many errors'] +=1
-            if PRINT_COLOURED_DIFF:
-                printDiff(errors, read, ref, ctr, PRINT_COLOURED_DIFF)
+            if args.debug:
+                printDiff(errors, read, ref, ctr, args.debug)
             continue
+
         # count up all errors in one massive dictionary
         elif len(errors) > 1:
             all_counts[errors] += 1
             if errors[0] in valid_counts.keys():
-                valid_counts[errors[0]].insert(errors)
+                    valid_counts[errors[0]].insert(errors)
 
     return valid_counts, all_counts
-
-    # # Print everything interesting to output
-    #
-    # with open(args.output + ".csv", "w") as output:
-    #     print("Rejected", file = output)
-    #     for (key, value) in rejected.items():
-    #         print(key, value, sep=",", file = output)
-    #     print("Substitutions", file = output)
-    #     for (key, value) in subcounts.items():
-    #         print(' '.join(key), value, sep=",", file = output)
-    #     print("Deletions", file = output)
-    #     for (key, value) in delcounts.items():
-    #         print(' '.join(key), value, sep=",", file = output)
-    #
-    # with open(args.output + ".all.csv", "w") as output:
-    #     for (key, value) in allcounts.items():
-    #         print(' '.join(key), value, sep=",", file = output)
-    #
-    # with open(args.output + ".d3transposon.csv", "w") as output:
-    #     for (key, value) in delcounts.items():
-    #         if key.count('---') == 1:
-    #             print(key[0], value, sep=",", file = output)
-    #
-    # time_4 = time.time()
-    # print("Printed results in", (time_4 - time_3) // 60, "min and", (time_4 - time_3) % 60, "s")
-
 
 if __name__ == "__main__":
     """
@@ -124,10 +96,22 @@ if __name__ == "__main__":
     parser.add_argument('-r', '--reference', help='Reference fasta file with with the alignment was constructed',
                         required=True)
     parser.add_argument('-o', '--output', help='Output file name', required=True)
-    parser.add_argument('-d', '--debug', help='Turn on debugging', required=False, action="store_true")
+    parser.add_argument('-d', '--debug', help='Turn on debugging', required=False, action="store_true") # Visual representation of how reads match reference
     args = parser.parse_args()
 
-    # Visual representation of how reads match reference
-    PRINT_COLOURED_DIFF = args.debug
+    # max number of mutations called in a read
+    MAX_ERRORS = 4
+
+    # How many nucleotides need to match at the end of a read for a valid alignment:
+    # - matching 2 should correct alignment errors, 3 avoids problems with InDel
+    #   repositioning
+    # - 3 also simplifies handling the first codon: it's either complete or it's OK
+    #   to move 1 or 2 bases over to the next triplet
+    MATCH_N_END = 3
 
     valid_counts, all_counts = countOneAlignment()
+
+    with open(args.output + '.valid_counts.p', 'wb') as f:
+        pickle.dump(valid_counts, f)
+    with open(args.output + '.all_counts.p', 'wb') as f:
+        pickle.dump(all_counts, f)

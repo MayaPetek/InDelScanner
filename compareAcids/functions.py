@@ -9,28 +9,15 @@ from Bio.Seq import MutableSeq
 from Bio.Data import CodonTable
 
 from stringUtils import getChar, getChars
-from outputUtils import printErrors, printDiff
-
-# max number of mutations called in a read
-MAX_ERRORS = 4
-
-# How many nucleotides need to match at the end of a read for a valid alignment:
-# - matching 2 should correct alignment errors, 3 avoids problems with InDel
-#   repositioning
-# - 3 also simplifies handling the first codon: it's either complete or it's OK
-#   to move 1 or 2 bases over to the next triplet
-MATCH_N_END = 3
 
 class allowedDict(dict):
     def insert(self, errors):
-        # assume other is a list describing errors, given by findErrors
-        e = tuple(errors)
+        # errors is a tuple given by findErrors
         try:
-            self[e] += 1
+            self[errors] += 1
         except KeyError:
             pass
         return
-
 
 
 def findEnds(read, ref):
@@ -58,7 +45,7 @@ def findEnds(read, ref):
     return ends
 
 
-def endMatch(read, ref, ends):
+def endMatch(read, ref, ends, MATCH_N_END):
     """
     Aligner errors arise when mutations are at the ends of the read rather than in the middle.
     Trimming ends only shifts the problem. Instead require that read ends match the reference.
@@ -130,7 +117,7 @@ def gapAlign(read, gap):
     return read
 
 
-def verifyRead(read, ref, rejected):
+def verifyRead(read, ref, rejected, MATCH_N_END):
     # Reject reads with multiple gaps
     if hasMultipleGaps(read):
         rejected['multigap'] += 1
@@ -139,7 +126,7 @@ def verifyRead(read, ref, rejected):
     ends = findEnds(read, ref)
 
     # Reject reads with errors at the ends
-    if not endMatch(read, ref, ends):
+    if not endMatch(read, ref, ends, MATCH_N_END):
         rejected['ends misalign'] += 1
         return
 
@@ -171,7 +158,11 @@ def classifyPoint(expectedCodon, actualCodon, codons):
 
 def findErrors(read, ref, rejected, codons):
     """
+    @ read, ref: MutableSeq objects
+    @ rejected: defaultdict(int) for counting bad reads
+    @ codons: all valid codons incl. stop codons, but not '---'
     Returns None for broken reads and a tuple containing errors otherwise
+
     We've got to find and report several types of difference: insertion, deletion, and substitution.
     We'll begin by running through the strings until we find the first 3-letter block that contains a "-"
     in either string, or which has letters in both strings, but they differ.
@@ -221,37 +212,36 @@ def findErrors(read, ref, rejected, codons):
 
 def prepareCounts(reference):
     """
-    @param reference: a Seq object
+    @param reference: a SeqRecord object
 
     Generate all possible deletions, clasify them and set up counts
     Mutations in NGS reads are then compared against this list and if they fit,
     they are counted towards the final summary
     1. create a "mutation" read
-    2. Convert mutation & reference to suitable RefSeq objects
     3. Call errors
     4. Append to count dictionary
     """
     deletion = [3, 6, 9]
     codons = list(CodonTable.unambiguous_dna_by_name["Standard"].forward_table.keys())
     codons += CodonTable.unambiguous_dna_by_name["Standard"].stop_codons
-    print(len(codons))
+
     interesting = ('s', 'ss', 'd', 'sd', 'dd', 'sdd', 'ddd', 'sddd')
     codons.sort()
 
     counts = {t:allowedDict() for t in interesting}
     rejected = defaultdict(int)  # create keys as new mistakes are found
 
-    ref = str(reference)
+    ref = reference.seq.upper()
+    # Substitutions use getChars to slice strings, need reference to be a string
+    r = str(ref)
 
     for length in deletion:
-        for i in range(len(reference) - length):
-            possibleread = MutableSeq(ref[:i] + ("-" * length) + ref[i + length:],
-                                      reference.alphabet)
-            if not verifyRead(possibleread, reference, rejected):
+        for i in range(len(ref) - length):
+            possibleread = MutableSeq(r[:i] + ("-" * length) + r[i + length:],
+                                      ref.alphabet)
+            if not verifyRead(possibleread, ref, rejected):
                 continue
-
-            errors = findErrors(possibleread, reference, rejected, codons)
-
+            errors = findErrors(possibleread, ref, rejected, codons)
             try:
                 counts[errors[0]][errors] = 0
             except KeyError:
@@ -260,24 +250,28 @@ def prepareCounts(reference):
                 else:
                     print(errors)
                     raise
-    print(counts['sddd'])
 
-    for i in range(0, len(reference) - 3, 3):
-        for triplet in codons:
-            s1 = ("s", str(i), getChars(ref, i, 3), triplet)
-            s2 = ("ss", str(i), ref[i:i + 3], ref[i] + triplet[:2], str(i + 3),
-                  ref[i + 3:i + 6], triplet[2:] + ref[i + 4:i + 6])
-            s3 = ("ss", str(i), ref[i:i + 3], ref[i:i + 2] + triplet[:1], str(i + 3),
-                  ref[i + 3:i + 6], triplet[1:] + ref[i + 5])
-            for s in (s1, s2, s3):
-                if errors[0]:
-                    counts[errors[0]][errors] = 0
+    for t in codons:
+        for i in range(len(ref) - 3):
+            possibleread = MutableSeq(r[:i] + t + r[i + 3:],
+                                      ref.alphabet)
+            if not verifyRead(possibleread, ref, rejected):
+                continue
+            errors = findErrors(possibleread, ref, rejected, codons)
+            try:
+                counts[errors[0]][errors] = 0
+            except KeyError:
+                if errors[0] == '':
+                    pass
+                else:
+                    print(errors)
+                    raise
 
     return counts
 
 
 def saveCounts(reference):
-    counts = prepareCounts(reference.seq.upper())
+    counts = prepareCounts(reference)
     with open(reference.name + '.counts.p', 'wb') as f:
         pickle.dump(counts, f)
 
