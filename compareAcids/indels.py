@@ -35,6 +35,8 @@ def countOneAlignment():
 
     reference = SeqIO.read(args.reference,'fasta', alphabet=IUPAC.ambiguous_dna)
 
+    MAX_ERROR_INDEX = len(reference) - 1
+
     try:
         valid_counts = loadCounts(reference)
         print("Imported counts")
@@ -57,7 +59,7 @@ def countOneAlignment():
         ref = pair[0].seq.tomutable()
         read = pair[1].seq.tomutable()
        
-        errors = findErrors(read, ref, rejected, codons) # errors = a tuple
+        errors = findErrors(read, ref, rejected, codons, MAX_ERROR_INDEX) # errors = a tuple
 
         # is the read broken?
         if not verifyRead(read, ref, rejected, MATCH_N_END):

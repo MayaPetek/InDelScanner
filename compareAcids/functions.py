@@ -156,7 +156,7 @@ def classifyPoint(expectedCodon, actualCodon, codons):
             return 'b'
 
 
-def findErrors(read, ref, rejected, codons):
+def findErrors(read, ref, rejected, codons, MAX_ERROR_INDEX):
     """
     @ read, ref: MutableSeq objects
     @ rejected: defaultdict(int) for counting bad reads
@@ -200,6 +200,10 @@ def findErrors(read, ref, rejected, codons):
         suffix = str(read[i + 3:])
         if re.search('[ATGC]', suffix) is None and "-" in actualCodon:
             break
+
+        if i > MAX_ERROR_INDEX:
+            if errors[0].find('i') == -1:
+                break
 
         # Compare the triplets! Continue with 0-based counts.
         if expectedCodon != actualCodon:
