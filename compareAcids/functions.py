@@ -10,6 +10,16 @@ from Bio.Data import CodonTable
 
 from stringUtils import getChar, getChars
 
+# max number of mutations called in a read
+MAX_ERRORS = 4
+
+# How many nucleotides need to match at the end of a read for a valid alignment:
+# - matching 2 should correct alignment errors, 3 avoids problems with InDel
+#   repositioning
+# - 3 also simplifies handling the first codon: it's either complete or it's OK
+#   to move 1 or 2 bases over to the next triplet
+MATCH_N_END = 3
+
 class allowedDict(dict):
     def insert(self, errors):
         # errors is a tuple given by findErrors
@@ -45,7 +55,7 @@ def findEnds(read, ref):
     return ends
 
 
-def endMatch(read, ref, ends, MATCH_N_END):
+def endMatch(read, ref, ends, MATCH_N_END=0):
     """
     Aligner errors arise when mutations are at the ends of the read rather than in the middle.
     Trimming ends only shifts the problem. Instead require that read ends match the reference.
@@ -117,7 +127,7 @@ def gapAlign(read, gap):
     return read
 
 
-def verifyRead(read, ref, rejected, MATCH_N_END):
+def verifyRead(read, ref, rejected, MATCH_N_END=0):
     # Reject reads with multiple gaps
     if hasMultipleGaps(read):
         rejected['multigap'] += 1
@@ -156,7 +166,7 @@ def classifyPoint(expectedCodon, actualCodon, codons):
             return 'b'
 
 
-def findErrors(read, ref, rejected, codons, MAX_ERROR_INDEX):
+def findErrors(read, ref, rejected, codons, MAX_ERROR_INDEX=720):
     """
     @ read, ref: MutableSeq objects
     @ rejected: defaultdict(int) for counting bad reads
@@ -206,7 +216,8 @@ def findErrors(read, ref, rejected, codons, MAX_ERROR_INDEX):
                 break
 
         # Compare the triplets! Continue with 0-based counts.
-        if expectedCodon != actualCodon:
+        if not re.match(actualCodon, expectedCodon):
+        #if expectedCodon != actualCodon:
             t = classifyPoint(expectedCodon, actualCodon, codons)
             errors[0] += t
             errors.extend([str(i), expectedCodon, actualCodon])
@@ -239,11 +250,12 @@ def prepareCounts(reference):
     # Substitutions use getChars to slice strings, need reference to be a string
     r = str(ref)
 
+    # MAKE DELETIONS
     for length in deletion:
         for i in range(len(ref) - length):
             possibleread = MutableSeq(r[:i] + ("-" * length) + r[i + length:],
                                       ref.alphabet)
-            if not verifyRead(possibleread, ref, rejected):
+            if not verifyRead(possibleread, ref, rejected, MATCH_N_END):
                 continue
             errors = findErrors(possibleread, ref, rejected, codons)
             try:
@@ -255,6 +267,7 @@ def prepareCounts(reference):
                     print(errors)
                     raise
 
+    # MAKE SUBSTITUTIONS
     for t in codons:
         for i in range(len(ref) - 3):
             possibleread = MutableSeq(r[:i] + t + r[i + 3:],
@@ -274,12 +287,13 @@ def prepareCounts(reference):
     return counts
 
 
-def saveCounts(reference):
+def saveCounts(reference, suffix):
     counts = prepareCounts(reference)
-    with open(reference.name + '.counts.p', 'wb') as f:
+    with open(reference.name + suffix, 'wb') as f:
         pickle.dump(counts, f)
+    return counts
 
-def loadCounts(reference):
-    with open(reference.name + '.counts.p', 'rb') as f:
+def loadCounts(reference, suffix):
+    with open(reference.name + suffix, 'rb') as f:
         counts = pickle.load(f)
     return counts

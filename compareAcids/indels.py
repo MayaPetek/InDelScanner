@@ -6,12 +6,13 @@ import argparse
 
 from collections import defaultdict
 
-from functions import loadCounts, prepareCounts, findErrors, verifyRead
+from functions import loadCounts, saveCounts, prepareCounts, findErrors, verifyRead
 from outputUtils import printDiff
 
 from Bio import SeqIO, AlignIO
 from Bio.Alphabet import IUPAC
 from Bio.Data import CodonTable
+from Bio.Seq import MutableSeq
 
 
 def countOneAlignment():
@@ -33,17 +34,16 @@ def countOneAlignment():
     codons = list(CodonTable.unambiguous_dna_by_name["Standard"].forward_table.keys())
     codons += CodonTable.unambiguous_dna_by_name["Standard"].stop_codons
 
-    reference = SeqIO.read(args.reference,'fasta', alphabet=IUPAC.ambiguous_dna)
+    reference = SeqIO.read(args.reference, 'fasta', alphabet=IUPAC.ambiguous_dna)
 
     MAX_ERROR_INDEX = len(reference) - 1
 
     try:
-        valid_counts = loadCounts(reference)
+        valid_counts = loadCounts(reference, '.counts.p')
         print("Imported counts")
     except IOError:
         print("Making counts")
-        valid_counts = prepareCounts(reference)
-        raise
+        valid_counts = saveCounts(reference, '.counts.p')
 
     all_counts = defaultdict(int)
     rejected = defaultdict(int)
@@ -52,25 +52,27 @@ def countOneAlignment():
     
     # reading & looping over read/reference sequence in multiple sequence alignment
     # use AlignIO parser and keep sequence only, allowing it to change (important for gap shifts) 
-    for pair in AlignIO.parse(args.alignment,"fasta", alphabet = IUPAC.ambiguous_dna, seq_count = 2):
+    for pair in AlignIO.parse(args.alignment,"fasta", alphabet=IUPAC.ambiguous_dna, seq_count=2):
 
         ctr += 1
 
         ref = pair[0].seq.tomutable()
-        read = pair[1].seq.tomutable()
-       
+        read = pair[1].seq
+        read = MutableSeq(str(read).replace('N', '.'), read.alphabet)
+        id = pair[1].id
+
         errors = findErrors(read, ref, rejected, codons, MAX_ERROR_INDEX) # errors = a tuple
 
         # is the read broken?
         if not verifyRead(read, ref, rejected, MATCH_N_END):
             if args.debug:
-                printDiff(errors, read, ref, ctr, args.debug)
+                printDiff(errors, read, ref, id, ctr, args.debug)
             continue
 
         if (len(errors) // 3) > MAX_ERRORS: # len(errors) = 1, 4, 7,...
             rejected['too many errors'] +=1
             if args.debug:
-                printDiff(errors, read, ref, ctr, args.debug)
+                printDiff(errors, read, ref, id, ctr, args.debug)
             continue
 
         # count up all errors in one massive dictionary
@@ -117,3 +119,7 @@ if __name__ == "__main__":
         pickle.dump(valid_counts, f)
     with open(args.output + '.all_counts.p', 'wb') as f:
         pickle.dump(all_counts, f)
+
+    for k, v in valid_counts['d'].items():
+        if v > 0:
+            print(k,v)
