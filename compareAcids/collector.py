@@ -327,6 +327,45 @@ def total_protein(total):
                                          'pred_activity': total[k][errors]['pred_activity']}
     return protein
 
+def sub_that_change_del(protein):
+    """
+    Look for substitutions that change the effect of deletions.
+    Go through all errors that on protein level are classified as 'sd', 'sdd' or 'sddd' and compare their effect with
+    corresponding pure deletion. If there is a difference, report:
+    - which deletion & which combined substitution-deletion
+    - predicted activity (incl. confidence) for both
+    :param protein: dictinary listing all mutations by effect on protein. protein['d'][errors]['protein'/'pred_activity']
+    :return: interesting mutations
+    """
+
+    sd_dif = {}
+
+    for prot_key in ('sd', 'sdd', 'sddd'):
+        for error in protein[prot_key].keys():
+            del_error = list(error)
+            sub_error = tuple(['s'] + del_error[1:4])
+            del_error = tuple([error[0][1:]] + del_error[4:])
+
+            act_sd = protein[prot_key][error]['pred_activity']
+            act_d = protein[del_error[0]][del_error]['pred_activity']
+            act_s = protein['s'][sub_error]['pred_activity']
+
+            if act_sd[1] < 2 or act_d[1] < 2:
+                continue
+            elif act_sd[0] != act_d[0]:
+                print(error, act_sd)
+                print('protein', total[error[0]][error]['protein'])
+                print('counts', total[error[0]][error]['counts'])
+                print(del_error, act_d)
+                print('protein', total[del_error[0]][del_error]['protein'])
+                print('counts', total[del_error[0]][del_error]['counts'])
+                print(sub_error, act_s)
+                print('protein', total['s'][sub_error]['protein'])
+                print('counts', total['s'][sub_error]['counts'])
+                print()
+
+    return sd_dif
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('-r', '--reference', help='Reference fasta file', required=True)
@@ -341,12 +380,17 @@ if __name__ == "__main__":
     total = get_sequencing_data(total)
     protein = total_protein(total)
 
-    points = generate_experimental_points()
+    eGFP = {'total': total, 'protein': protein}
+    with open('eGFP.p', 'wb') as f:
+        pickle.dump(eGFP, f)
 
-    plot_known_mutations(points)
+    # points = generate_experimental_points()
+    #
+    # plot_known_mutations(points)
+    #
+    # for k in ('d', 'dd', 'ddd', 'sd', 'sdd', 'sddd'):
+    #     protein[k]['pymol'] = print_pymol(k, protein)
+    #     for frac, resi in protein[k]['pymol'].items():
+    #         print(k, frac, '+'.join(resi))
 
-    for k in ('d', 'dd', 'ddd', 'sd', 'sdd', 'sddd'):
-        protein[k]['pymol'] = print_pymol(k, protein)
-        for frac, resi in protein[k]['pymol'].items():
-            print(k, frac, '+'.join(resi))
-
+    # sub_that_change_del(protein)
