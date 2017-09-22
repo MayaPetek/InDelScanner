@@ -4,7 +4,7 @@ import pickle
 import argparse
 import csv
 
-from functions import loadCounts, findErrors
+from functions import loadCounts, findErrors, classify_protein, classify_point_protein
 from collections import defaultdict
 
 from Bio import SeqIO
@@ -16,6 +16,12 @@ import random
 import matplotlib.pyplot as pyplot
 
 def set_up_total(reference):
+    """
+    Find the pre-prepared counts for gene reference, load it and prepare a dictionary
+    :param reference: fasta file. Expect a corresponding reference.counts.p, output of prepareCounts & saveCounts.
+    :return: dictionary descrbies everything know about a mutation
+             total['type]['counts'/'depth'//'protein'/'exp_activity'/'pred_activity']
+    """
     valid_counts = loadCounts(reference, '.counts.p')
     total = {}
     for t in valid_counts.keys():
@@ -24,42 +30,15 @@ def set_up_total(reference):
             total[t][e] = {'counts': {}, 'depth': {}, 'protein': '', 'exp_activity': '', 'pred_activity': ''}
     return total
 
-def get_sequencing_data(total):
-    # input file need: path to counts file, fraction name
-    with open(args.files, 'r') as f:
-        for line in  f.readlines():
-            # name = H/N/L/MM, denotes activity fraction
-            name, count_loc, depth1_loc, depth2_loc = line.rstrip().split(',')
-            depth = calculate_depth(depth1_loc, depth2_loc)
-            # load individual counts
-            with open(count_loc, 'rb') as p:
-                counts = pickle.load(p)
-
-            # read all data into t
-            for t in counts.keys():
-                for errors, number in counts[t].items():
-                    if len(errors) == 1:
-                        continue
-                    total[t][errors]['depth'][name] = average_depth(errors, depth)
-                    total[t][errors]['counts'][name] = number
-                    total[t][errors]['protein'] = error_to_protein(errors)
-
-                    if errors in experimental:
-                        total[t][errors]['exp_activity'] = experimental[errors]['activity']
-                    else:
-                        total[t][errors]['exp_activity'] = None
-
-    # once all fractions are in total, compare H/MM/L/N counts to get an overall prediction
-    for m in total.keys():
-        for errors in total[m].keys():
-            total[m][errors]['pred_activity'] = predict_activity(errors, total)
-
-    return total
 
 def get_experimental_data():
-    # If experimental data is provided, collect that data into a dictionary
-    # experimental[errors]{'activity': float, 'protein': string}
-    # The file is CSV format with header, columns give start & end of deletion, activity (float) and protein effect
+    """
+    If experimental data is provided, collect that data into a dictionary
+    The file is CSV format with header, columns give start & end of deletion, activity (float) and protein effect
+    If no data is provided, return empty dictionary.
+    :return: experimental[errors]{'activity': float, 'protein': string}
+    """
+
     experimental = {}
     rejected = defaultdict(int)
     codons = list(CodonTable.unambiguous_dna_by_name["Standard"].forward_table.keys())
@@ -90,15 +69,19 @@ def calculate_depth(depth_1, depth_2):
     Collect samtools depth output into a list. 2nd column = 1-based position, 3rd column = coverage.
     Samtools gives two separate files for assembled and unassembled reads
     :param depth_file: output of samtools depth, tab delimited
-    :return: a list with coverage per position as ints
+    :return: a list of ints with coverage per position
     """
 
     depth = []
+    # depth of assembled and unassembled reads is in two separate files
     with open(depth_1, 'r') as f:
         for line in f.readlines():
             l = line.split()
+            # depth in third column, 'samtools depth' output
             depth.append(int(l[2]))
+    # open second file and add the count to same position in depth list
     with open(depth_2, 'r') as f:
+        for line in f.readlines():
             l = line.split()
             i = int(l[1]) - 1
             depth[i] += int(l[2])
@@ -106,9 +89,10 @@ def calculate_depth(depth_1, depth_2):
 
 def average_depth(errors, depth):
     """
-    Use errors description to find which part of reference it is located in, average coverage over that sequence.
+    Use errors description to find which nucleotides it fits in, average coverage over that sequence.
+    Includes positions in the mutations codons that don't change themselves.
     :param errors: a tuple describing a set of mutations
-    :param depth: a list giving coverage per position
+    :param depth: a list giving coverage per nucleotide position, eg. depth[16]=3378
     :return: a float giving average coverage for this mutation
     """
     # to allow non-consecutive mutations
@@ -121,6 +105,13 @@ def average_depth(errors, depth):
     return avg
 
 def error_to_protein(errors):
+    """
+    The first position in errors classifies a mutation on DNA level, eg. 'sd'. Then come groups of 3:
+    DNA position, reference codon, actual codon
+    This attempts to translate both codons and compares them to find the effect of mutation on the protein
+    :param errors: tuple describing a mutation, output of findErrors
+    :return: string in standard protein mutation, eg. S22A/K23Δ . Δ=amino acid deletion.
+    """
     protein = []
     for i in range(1, len(errors), 3):
         dna_pos = int(errors[i])
@@ -140,10 +131,15 @@ def error_to_protein(errors):
     return '/'.join(protein)
 
 def predict_activity(errors, total):
-    """use entries in total[errors[0]][errors] to predict activity
+    """
+    Use entries in total[errors[0]][errors] to predict activity
     - pred_activity: H/M/L, whichever has the highest frequency of observing this mutation
     - confidence: 0 for N<5, 1 for 6 <= N < 10, 2 for 11 <= N < 20, 3 for 21 <= N < 50, 4 for <= N < 100, 5 for 100 <= N
+    :param errors: which mutation to look up
+    :param total: total = full DNA dictionary, must contain all information at this point
+    :return: tuple (H/M/L, confidence) where confidence is an int
     """
+
     # make a dictionary: enrichment - fraction, eg. 1.80:H, 0.1:MM, 0.0: L
     enrichment = {}
     N_freq = total[errors[0]][errors]['counts']['N'] / total[errors[0]][errors]['depth']['N']
@@ -179,7 +175,52 @@ def predict_activity(errors, total):
 
     return (pred_activity, pred_confidence)
 
+
+def get_sequencing_data(total):
+    """
+    The input file in args.file lists where counts & depth data is located:
+    line = name,counts file loc,depth file loc, depth 2 file loc, activity (H/N/MM/L)
+    Read in all mutations, predict activity and place them in total.
+    :param total: at first empty dictionary with keys for all expected mutations
+    :return: added all known information about expected mutations
+    """
+    # input file need: path to counts file, fraction name
+    with open(args.files, 'r') as f:
+        for line in  f.readlines():
+            # name = H/N/L/MM, denotes activity fraction
+            name, count_loc, depth1_loc, depth2_loc = line.rstrip().split(',')
+            depth = calculate_depth(depth1_loc, depth2_loc)
+            # load individual counts
+            with open(count_loc, 'rb') as p:
+                counts = pickle.load(p)
+
+            # read all data into t
+            for t in counts.keys():
+                for errors, number in counts[t].items():
+                    if len(errors) == 1:
+                        continue
+                    total[t][errors]['depth'][name] = average_depth(errors, depth)
+                    total[t][errors]['counts'][name] = number
+                    total[t][errors]['protein'] = error_to_protein(errors)
+
+                    if errors in experimental:
+                        total[t][errors]['exp_activity'] = experimental[errors]['activity']
+                    else:
+                        total[t][errors]['exp_activity'] = None
+
+    # once all fractions are in total, compare H/MM/L/N counts to get an overall prediction
+    for m in total.keys():
+        for errors in total[m].keys():
+            total[m][errors]['pred_activity'] = predict_activity(errors, total)
+
+    return total
+
+
 def generate_experimental_points():
+    """
+    Convert experimental data into points for pyplot.
+    :return: points, dictionary containing three lists: x, y coordinates & colour
+    """
 
     # set color maps
     green_map = pyplot.cm.get_cmap('Greens')
@@ -278,38 +319,6 @@ def print_pymol(fraction, dictionary):
     return f
 
 
-def classify_point_protein(expected, actual):
-    """
-    Assume errors is a well-behaved mutation, that is s/d only
-    :param expected:
-    :param actual:
-    :return: string, 's' or 'd'
-    """
-    dna_ref = Seq(expected, alphabet=IUPAC.ambiguous_dna)
-    dna_mut = Seq(actual, alphabet=IUPAC.ambiguous_dna)
-    prot_ref = str(dna_ref.translate())
-
-    if str(dna_mut) == '---':
-        return 'd'
-    else:
-        prot_mut = str(dna_mut.translate())
-
-    if prot_ref != prot_mut:
-        return 's'
-    else:
-        return ''
-
-
-def classify_protein(errors):
-    protein_errors = []
-    for i in range(1, len(errors), 3):
-        protein_errors.append(classify_point_protein(errors[i+1], errors[i+2]))
-    prot = ''.join(protein_errors)
-    if prot == '':
-        return 'wt'
-    else:
-        return prot
-
 def total_protein(total):
     """
     Total is a large dictionary that contains all sequencing data on DNA level. Some substitutions are between synonymous
@@ -323,7 +332,8 @@ def total_protein(total):
     for k in total.keys():
         for errors in total[k]:
             prot_key = classify_protein(errors)
-            protein[prot_key][errors] = {'protein': total[k][errors]['protein'],
+            prot_errors = error_to_protein(errors)
+            protein[prot_key][prot_errors] = {'protein': total[k][errors]['protein'],
                                          'pred_activity': total[k][errors]['pred_activity']}
     return protein
 
@@ -350,18 +360,20 @@ def sub_that_change_del(protein):
             act_d = protein[del_error[0]][del_error]['pred_activity']
             act_s = protein['s'][sub_error]['pred_activity']
 
-            if act_sd[1] < 2 or act_d[1] < 2:
+            if act_sd[1] < 3 or act_d[1] < 3:
                 continue
             elif act_sd[0] != act_d[0]:
-                print(error, act_sd)
-                print('protein', total[error[0]][error]['protein'])
+
+                print('protein', total[error[0]][error]['protein'], act_sd)
                 print('counts', total[error[0]][error]['counts'])
-                print(del_error, act_d)
-                print('protein', total[del_error[0]][del_error]['protein'])
+
+                print('protein', total[del_error[0]][del_error]['protein'], act_d)
                 print('counts', total[del_error[0]][del_error]['counts'])
-                print(sub_error, act_s)
-                print('protein', total['s'][sub_error]['protein'])
+
+                print('protein', total['s'][sub_error]['protein'], act_s)
                 print('counts', total['s'][sub_error]['counts'])
+
+                print(error, del_error, sub_error)
                 print()
 
     return sd_dif
@@ -393,4 +405,4 @@ if __name__ == "__main__":
     #     for frac, resi in protein[k]['pymol'].items():
     #         print(k, frac, '+'.join(resi))
 
-    # sub_that_change_del(protein)
+    #sub_that_change_del(protein)

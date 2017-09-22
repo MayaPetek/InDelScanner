@@ -5,8 +5,9 @@ import pickle
 
 from collections import defaultdict
 
-from Bio.Seq import MutableSeq
+from Bio.Seq import Seq, MutableSeq
 from Bio.Data import CodonTable
+from Bio.Alphabet import IUPAC
 
 from stringUtils import getChar, getChars
 
@@ -164,6 +165,40 @@ def classifyPoint(expectedCodon, actualCodon, codons):
             return 's'
     else:
             return 'b'
+
+
+def classify_point_protein(expected, actual):
+    """
+    Generate first position of errors, ie. 'sdd'/'d', classification.
+    Assume errors is a well-behaved mutation, that is s/d only
+    :param expected:
+    :param actual:
+    :return: string, 's' or 'd'
+    """
+    dna_ref = Seq(expected, alphabet=IUPAC.ambiguous_dna)
+    dna_mut = Seq(actual, alphabet=IUPAC.ambiguous_dna)
+    prot_ref = str(dna_ref.translate())
+
+    if str(dna_mut) == '---':
+        return 'd'
+    else:
+        prot_mut = str(dna_mut.translate())
+
+    if prot_ref != prot_mut:
+        return 's'
+    else:
+        return ''
+
+
+def classify_protein(errors):
+    protein_errors = []
+    for i in range(1, len(errors), 3):
+        protein_errors.append(classify_point_protein(errors[i+1], errors[i+2]))
+    prot = ''.join(protein_errors)
+    if prot == '':
+        return 'wt'
+    else:
+        return prot
 
 
 def findErrors(read, ref, rejected, codons, MAX_ERROR_INDEX=720):
