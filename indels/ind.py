@@ -1,0 +1,778 @@
+"""
+All functions for finding substitutions, insertions & deletions
+"""
+
+import re
+import glob
+import os
+import csv
+import pickle
+import numpy as np
+
+from Bio.Emboss.Applications import NeedleallCommandline
+
+from collections import defaultdict
+
+import Bio.AlignIO
+import Bio.SeqIO
+import Bio.Data.CodonTable
+import Bio.Alphabet.IUPAC
+from Bio.Seq import MutableSeq, Seq
+
+
+"""
+STRING UTILS
+"""
+
+
+def get_char(target, index):
+    """
+    Get a char from a string, or "-" if `index` is out of range.
+    """
+    if index < 0 or index >= len(target):
+        return "-"
+
+    return target[index]
+
+
+def get_chars(target, index, n):
+    """
+    Get a sequence of `n` chars from `target` at `index`, safely, via `getChar`
+    """
+
+    out = ""
+    for i in range(0, n):
+        out += get_char(target, index + i)
+
+    return out
+
+
+def set_char(target_str, char, i):
+    """
+    Set the character at index `i` in `targetStr` to `char`, returning the new string.
+    """
+
+    return target_str[:i] + char + target_str[i + 1:]
+
+# def steal_letter(fromStr, toStr, i):
+#     """
+#     Steal a letter from `fromStr` and write it to `toStr` at `i`.
+#     """
+#
+#     return set_char(toStr, fromStr[i], i)
+
+
+"""
+INPUT
+Read in data, prepare dictionaries, get experimental scores
+"""
+
+
+def get_codons(withdeletions=True):
+    """
+    :type withdeletions: bool
+    """
+    codons = list(Bio.Data.CodonTable.unambiguous_dna_by_name["Standard"].forward_table.keys())
+    codons += Bio.Data.CodonTable.unambiguous_dna_by_name["Standard"].stop_codons
+    if withdeletions:
+        codons = codons + ['---']
+    codons.sort()
+
+    return codons
+
+
+def prepare_counts(reference):
+    """
+    @param reference: a SeqRecord object
+
+    Generate all possible deletions, clasify them and set up counts
+    Mutations in NGS reads are then compared against this list and if they fit,
+    they are counted towards the final summary
+    1. create a "mutation" read
+    3. Call errors
+    4. Append to count dictionary
+    """
+    deletion = [3, 6, 9]
+    codons = get_codons(withdeletions=False)
+    codons_with_deletions = get_codons(withdeletions=True)
+    interesting = ('s', 'ss', 'd', 'sd', 'dd', 'sdd', 'ddd', 'sddd')
+
+    counts = {t: allowedDict() for t in interesting}
+    rejected = defaultdict(int)  # create keys as new mistakes are found
+
+    ref = reference.seq.upper()
+    # Substitutions use getChars to slice strings, need reference to be a string
+    r = str(ref)
+
+    # MAKE DELETIONS
+    for length in deletion:
+        for i in range(len(ref) - length):
+            possibleread = MutableSeq(r[:i] + ("-" * length) + r[i + length:],
+                                      ref.alphabet)
+            if not verifyRead(possibleread, ref, rejected, MATCH_N_END=3):
+                continue
+            errors = findErrors(possibleread, ref, rejected, codons_with_deletions)
+            try:
+                counts[errors[0]][errors] = 0
+            except KeyError:
+                if errors[0] == '':
+                    pass
+                else:
+                    print(errors)
+                    raise
+
+    # MAKE SUBSTITUTIONS
+    for t in codons:
+        for i in range(len(ref) - 3):
+            possibleread = MutableSeq(r[:i] + t + r[i + 3:],
+                                      ref.alphabet)
+            if not verifyRead(possibleread, ref, rejected):
+                continue
+            errors = findErrors(possibleread, ref, rejected, codons)
+            try:
+                counts[errors[0]][errors] = 0
+            except KeyError:
+                if errors[0] == '':
+                    pass
+                else:
+                    print(errors)
+                    raise
+
+    return counts
+
+
+def save_counts(reference, suffix):
+    counts = prepare_counts(reference)
+    with open(reference.name + suffix, 'wb') as f:
+        pickle.dump(counts, f)
+    return counts
+
+
+def load_counts(reference, suffix):
+    with open(reference.name + suffix, 'rb') as f:
+        counts = pickle.load(f)
+    return counts
+
+
+def set_up_total(reference):
+    """
+    Find the pre-prepared counts for gene reference, load it and prepare a dictionary
+    :param reference: fasta file. Expect a corresponding reference.counts.p, output of prepareCounts & saveCounts.
+    :return: dictionary descrbies everything know about a mutation
+             total['type]['counts'/'depth'//'protein'/'exp_activity'/'pred_activity']
+    """
+    valid_counts = load_counts(reference, '.counts.p')
+    total = {}
+    for t in valid_counts.keys():
+        total[t] = {}
+        for e in valid_counts[t].keys():
+            total[t][e] = {'counts': {}, 'depth': {}, 'protein': '', 'exp_activity': '', 'pred_activity': ''}
+    return total
+
+
+def get_experimental_data(args):
+    """
+    If experimental data is provided, collect that data into a dictionary
+    The file is CSV format with header, columns give start & end of deletion, activity (float) and protein effect
+    If no data is provided, return empty dictionary.
+    :param args: arguments processed with argparse, must include args.experimentsl (a csv file)
+    :return: experimental[errors]{'activity': float, 'protein': string}
+    """
+
+    experimental = {}
+    rejected = defaultdict(int)
+    codons = get_codons(withdeletions=False)
+
+    if not args.experimental:
+        return experimental
+
+    with open(args.experimental, 'r') as f:
+        lit = csv.DictReader(f, dialect='excel')
+        ref = reference.seq.upper().tomutable()
+        r = str(ref)
+        start, end, activity, protein = lit.fieldnames
+
+        for line in lit:
+            s = int(line.get(start))
+            e = int(line.get(end))
+            a = float(line.get(activity))
+            length = e - s
+            read = MutableSeq(r[:s] + ("-" * length) + r[e:], ref.alphabet)
+            errors = findErrors(read, ref, rejected, codons, MAX_ERROR_INDEX=720)
+            experimental[errors] = {'activity': a, 'protein': line.get(protein)}
+
+    return experimental
+
+
+"""
+INDIVIDUAL READS
+Check quality, match ends, find positions of indels
+"""
+
+
+def findEnds(read, ref):
+    """
+    Figure out where the first symbol of interest in the read is. This start point should be:
+    - Not a -.
+    - Not (yet) triplet aligned
+    Similarly find the last non-dash symbol in the read.
+    """
+    ends = {"start": 0, "end": len(ref)}
+    for i in range(0, len(ref)):
+        if read[i] != "-":
+            ends["start"] = i
+            ends["aligned"] = i
+            break
+
+    for i in range(0, len(ref)):
+        if read[-1 - i] != "-":
+            ends["end"] = len(ref) - i
+            break
+
+    while (ends.get("aligned") % 3 != 0):
+        ends["aligned"] += 1
+
+    return ends
+
+
+def endMatch(read, ref, ends, MATCH_N_END=3):
+    """
+    Aligner errors arise when mutations are at the ends of the read rather than in the middle.
+    Trimming ends only shifts the problem. Instead require that read ends match the reference.
+    Return False if either end doesn't match
+    """
+    startRead = read[ends.get("start"):ends.get("start") + MATCH_N_END]
+    startRef = ref[ends.get("start"):ends.get("start") + MATCH_N_END]
+    endRead = read[ends.get("end") - MATCH_N_END:ends.get("end")]
+    endRef = ref[ends.get("end") - MATCH_N_END:ends.get("end")]
+    start = startRead == startRef
+    end = endRead == endRef
+    return start and end
+
+
+def hasMultipleGaps(read):
+    """
+    Return true iff read contains multiple gaps.
+    """
+    # This regex looks for 3 distinct islands of letters. That implies at least two gaps.
+    return re.search('[ATGC]+-+[ATGC]+-+[ATGC]+', str(read)) != None
+
+
+def findGap(read):
+    """
+    Get the start and end index (as a 2-tuple) of the gap in readMatch, or None if there isn't one.
+    """
+    # Find the gap, captured in group 1. This gives us the indexes in the string where the gap starts and
+    # ends. (we define "gap" as "dashes in between letters". We previously used hasMultipleGaps to reject
+    # any strings which have multiple gaps (which would confuse this regex)).
+    match = re.search('[ATGC]+(-+)[ATGC]+', str(read))
+    if match == None:
+        # No gap exists.
+        return None
+
+    return (match.start(1), match.end(1))
+
+
+def gapAlign(read, gap):
+    """
+    Perform the "letter-stealing" operation:
+    - Find the gap (if there is one).
+    - While the gap startpoint is not aligned to a triplet boundary, move letters from the end of the gap
+      to the start of the gap.
+
+    @param read Aligned read to process.
+    @param gap The gap, as returned by findGap.
+    """
+
+    if gap is None:
+        return read
+
+    movingGap = (gap[0], gap[1])
+
+    # Shift letters from the end to the start...
+    while movingGap[0] % 3 != 0:
+        assert (read[movingGap[0]] == "-")
+
+        # This means we ran out of symbols to steal before we managed to align.
+        # This indicates a gap at the end, and one we can't fix. Reject!
+        if read[movingGap[1]] == "-":
+            return None
+
+        read[movingGap[0]] = read[movingGap[1]]
+        read[movingGap[1]] = "-"
+
+        # Shift the gap to the right...
+        movingGap = (movingGap[0] + 1, movingGap[1] + 1)
+
+    return read
+
+
+def verifyRead(read, ref, rejected, MATCH_N_END=3):
+    # Reject reads with multiple gaps
+    if hasMultipleGaps(read):
+        rejected['multigap'] += 1
+        return
+
+    ends = findEnds(read, ref)
+
+    # Reject reads with errors at the ends
+    if not endMatch(read, ref, ends, MATCH_N_END):
+        rejected['ends misalign'] += 1
+        return
+
+    # Reject reads with gaps that aren't a multiple of 3 in length.
+    gap = findGap(read)
+
+    if gap is not None:
+        gapSize = (gap[1] - gap[0])
+        if gapSize % 3 != 0:
+            rejected['gap length ' + str(gapSize)] += 1
+            return
+
+    return True
+
+
+"""
+FINDING ERRORS
+"""
+
+class allowedDict(dict):
+    def insert(self, errors):
+        # errors is a tuple given by findErrors
+        try:
+            self[errors] += 1
+        except KeyError:
+            pass
+        return
+
+
+def error_to_protein(errors):
+    """
+    The first position in errors classifies a mutation on DNA level, eg. 'sd'. Then come groups of 3:
+    DNA position, reference codon, actual codon
+    This attempts to translate both codons and compares them to find the effect of mutation on the protein
+    :param errors: tuple describing a mutation, output of findErrors
+    :return: string in standard protein mutation, eg. S22A/K23Δ . Δ=amino acid deletion.
+    """
+
+    # use the function for translating point mutations
+    protein = []
+    if len(errors) == 1:
+        return ''
+    elif 'b' in errors[0]:
+        return 'frameshift'
+    elif 'i' in errors[0]:
+        return 'insertion'
+
+    for i in range(1, len(errors), 3):
+        dna_pos = int(errors[i])
+        prot_pos = str(int(dna_pos / 3 + 1))
+        prot_ref = translate_point(errors[i+1])
+        prot_mut = translate_point(errors[i+2])
+
+        if prot_ref == prot_mut:
+            continue
+        protein.append(prot_ref + prot_pos + prot_mut)
+
+    return '/'.join(protein)
+
+
+
+def classify_protein(errors):
+    protein_errors = []
+    for i in range(1, len(errors), 3):
+        protein_errors.append(classify_point_protein(errors[i+1], errors[i+2]))
+    prot = ''.join(protein_errors)
+    if prot == '':
+        return 'wt'
+    else:
+        return prot
+
+
+def findErrors(read, ref, rejected, codons, MAX_ERROR_INDEX=720):
+    """
+    @ read, ref: MutableSeq objects
+    @ rejected: defaultdict(int) for counting bad reads
+    @ codons: all valid codons incl. stop codons and '---' if looking for deletions
+    Returns None for broken reads and a tuple containing errors otherwise
+
+    We've got to find and report several types of difference: insertion, deletion, and substitution.
+    We'll begin by running through the strings until we find the first 3-letter block that contains a "-"
+    in either string, or which has letters in both strings, but they differ.
+    After that, we will regard any "-" in read as being part of a deletion error, any "-" in ref as
+    being part of an insertion error, until we reach the point where all remaining symbols in read are
+    # "-" (at which point we are finished).
+    """
+
+    # Perform letter-stealing across the gap (if any). The resulting modified read will be ready for naive
+    # triplet-wise comparison.
+
+    ends = findEnds(read, ref)
+    gap = findGap(read)
+
+    errors = ['']
+    # the first position gives error classification, eg. 'dd' or 'sd'
+
+    read = gapAlign(read, gap)
+
+    if read is None:
+        rejected['unalignable ends'] += 1
+        return
+
+    for i in range(ends.get("aligned"), ends.get("end"), 3):
+        # Check if we've run out of symbols (the rest of the string is just dashes).
+        suffix = str(read[i:])
+        if re.search('[ATGC]', suffix) is None:
+            break
+
+        # Read this triplet from both strings.
+        expectedCodon = get_chars(str(ref), i, 3)
+        actualCodon = get_chars(str(read), i, 3)
+
+        # Check if this is the last acid, and it's incomplete, ignore it.
+        suffix = str(read[i + 3:])
+        if re.search('[ATGC]', suffix) is None and "-" in actualCodon:
+            break
+
+        if i > MAX_ERROR_INDEX:
+            if errors[0].find('i') == -1:
+                break
+
+        # Compare the triplets! Continue with 0-based counts.
+        if not re.match(actualCodon, expectedCodon):
+            t = classify_dna(expectedCodon, actualCodon, codons)
+            errors[0] += t
+            errors.extend([str(i), expectedCodon, actualCodon])
+
+
+    return tuple(errors)
+
+# From preferences.py
+
+def readDepth(depthfile):
+    with open(depthfile) as f:
+        d = csv.reader(f, delimiter=',')
+        h = next(d)
+        depth = defaultdict(dict)
+        for line in d:
+            depth[int(line[0])] = {h[i]: int(line[i]) for i in [1, 2, 3, 4]}
+    return depth
+
+
+""" Counts files comes in order of: Rejected, Substitutions, Deletions"""
+
+
+def readRejected(name, filelocation, rejected):
+    """ Read in file and add counts to corresponding index"""
+    with open(filelocation, newline='\n') as f:
+        rr = csv.reader(f, delimiter=',')  # gives list of strings
+        for line in rr:
+            if line[0] == "Rejected":
+                continue
+            elif line[0] == "Substitutions":
+                break
+            else:
+                rejected[line[0]][str(name)] = int(line[1])
+    return rejected
+
+
+def readDeletions(name, filelocation, dels):
+    """ Read in file and add counts to corresponding index"""
+    with open(filelocation, newline='\n') as f:
+        rr = csv.reader(f, delimiter=',')  # gives list of strings
+        for line in rr:
+            if "Deletions" in line[0]:
+                for line in rr:
+                    if line[0] == "Deletions":
+                        continue
+                    else:
+                        dels[line[0]][str(name)] = int(line[1])
+
+    return dels
+
+
+def typesubdel(mut):  # mut is a string
+
+    m = mut.split()
+    pos = int(m.pop(0))
+    name = ' '.join(m)
+
+    subdel = ""
+    for i in range(0, len(m), 3):
+        if m[i + 2] == '---':
+            subdel += "d"
+        else:
+            subdel += "s"
+
+    return pos, name, subdel
+
+
+def adjustFreq(depth, dels, hml):
+    # start with three interesting fractions & empty adjusted frequencies dict
+    freq = defaultdict(dict)
+
+    for mutation, library in dels.items():
+        pos, name, subdel = typesubdel(mutation)
+        if int(library.get("N", 0)) < 4:
+            continue
+        elif depth[pos]["N"] < 10000:
+            continue
+        else:
+            # we have found a well characterized mutation
+            freq[pos]["Name"] = name
+            freq[pos]["Residue"] = int(1 + (int(mutation.split(' ')[1]) - 1) / 3)
+            freq[pos]["SubDel"] = subdel
+            for entry in hml:
+                freq[pos][entry] = (library.get(entry, 0) * depth[pos][entry]) / (
+                    library.get("baseline") * library.get("N") * depth[pos]["N"])
+    return freq
+
+
+def intensity(freq, hml):
+    for pos, v in freq.items():
+        t = {k: v[k] for k in hml}
+        m = max(t, key=lambda x: t[x])
+        # max_key = max(v, key=lambda k: v[k])
+        if t[m] > 1:
+            freq[pos]["class"] = m
+        else:
+            freq[pos]["class"] = 0
+    return freq
+
+
+
+"""
+POINT FUNCTIONS
+Everything to do with a signle amino acid - conversion, classification, comparison
+"""
+
+def classify_dna(expectedCodon, actualCodon, validCodons):
+    """
+    Compare two codons and classify whether the mutation is a substition/insertion/deletion on DNA level
+    Assumes the two codons are different
+    :param expectedCodon: string
+    :param actualCodon: string
+    :param validCodons: list incl. '---' if looking for deletions
+    :return: one letter string d/i/s/b
+    """
+    # Compare two codons and return 's' if both are letters, 'd' if actual is a deletion and 'i' if insertion
+    cdn = set(validCodons)
+    if {expectedCodon,actualCodon}.issubset(cdn):  # both codons are valid
+        if actualCodon == "---":
+            return 'd'
+        elif expectedCodon == "---":
+            return 'i'
+        elif expectedCodon == actualCodon:
+            return ''
+        else:
+            return 's'
+    else:
+            return 'b'
+
+
+def translate_point(triplet):
+    """
+    Take a codon and translate into single letter amino acid, including deletions
+    :param triplet: string
+    :return: single letter string
+    """
+    codon = Seq(triplet, alphabet=Bio.Alphabet.IUPAC.ambiguous_dna)
+    if triplet == '---':
+        aa = 'Δ'
+    else:
+        aa = str(codon.translate())
+
+    return aa
+
+def classify_point_protein(expected, actual):
+    """
+    Generate first position of errors, ie. 'sdd'/'d', classification.
+    Assume errors is a well-behaved mutation, that is s/d only
+    :param expected:
+    :param actual:
+    :return: string, 's' or 'd'
+    """
+    dna_ref = Seq(expected, alphabet=Bio.Alphabet.IUPAC.ambiguous_dna)
+    dna_mut = Seq(actual, alphabet=Bio.Alphabet.IUPAC.ambiguous_dna)
+    prot_ref = str(dna_ref.translate())
+
+    if str(dna_mut) == '---':
+        return 'd'
+    else:
+        prot_mut = str(dna_mut.translate())
+
+    if prot_ref != prot_mut:
+        return 's'
+    else:
+        return ''
+
+"""
+DEPTH as generated by samtools
+"""
+
+
+def calculate_depth(depth_1, depth_2):
+    """
+    Collect samtools depth output into a list. 2nd column = 1-based position, 3rd column = coverage.
+    Samtools gives two separate files for assembled and unassembled reads
+    :param depth_1: output of samtools depth, tab delimited
+    :param depth_2: same for other set of reads
+    :return: a list of ints with coverage per position
+    """
+
+    depth = []
+    # depth of assembled and unassembled reads is in two separate files
+    with open(depth_1, 'r') as f:
+        for line in f.readlines():
+            l = line.split()
+            # depth in third column, 'samtools depth' output
+            depth.append(int(l[2]))
+    # open second file and add the count to same position in depth list
+    with open(depth_2, 'r') as f:
+        for line in f.readlines():
+            l = line.split()
+            i = int(l[1]) - 1
+            depth[i] += int(l[2])
+    return depth
+
+def average_depth(errors, depth):
+    """
+    Use errors description to find which nucleotides it fits in, average coverage over that sequence.
+    Includes positions in the mutations codons that don't change themselves.
+    :param errors: a tuple describing a set of mutations
+    :param depth: a list giving coverage per nucleotide position, eg. depth[16]=3378
+    :return: a float giving average coverage for this mutation
+    """
+    # to allow non-consecutive mutations
+    e_depth = []
+    nt = len(errors) - 1
+    for i in range(1,nt,3):
+        start = int(errors[i])
+        e_depth += depth[start:start+3]
+    avg = sum(e_depth) / nt
+    return avg
+
+"""
+SANGER SEQUENCING
+"""
+
+# Useful function to make directories (and pass if dir already exists)
+def mkdir_p(path):
+    try:
+        os.makedirs(path)
+    except OSError:
+        if os.path.isdir(path):
+            pass
+        else: raise
+
+
+def trim_fastq_biopython(in_file, out_file, q_cutoff=10, consec=6, id=None):
+    """
+    Trim a FASTQ file and write out the trimmed sequences as a FASTQ file.
+
+    Only processes the sequence with identifer string rec.  If id
+    is None, takes first sequence.
+    """
+    # Load in sequences using Bio.SeqIO.  We'll keep the result as a dict.
+    with open(in_file, 'rU') as f:
+        seqs = Bio.SeqIO.to_dict(Bio.SeqIO.parse(f, 'fastq'))
+
+    # Pull out the id we want
+    if id is None:
+        key, seq = seqs.popitem()
+    else:
+        try:
+            seq = seqs[id]
+        except KeyError:
+            raise KeyError('id not found in input file')
+
+    # Get Boolean array for good quality
+    q_good = np.array(seq.letter_annotations['phred_quality']) >= q_cutoff
+
+    # Find first set of consec good bases
+    i = 0
+    while i < len(q_good) - consec and not q_good[i:i + consec].all():
+        i += 1
+
+    # Find last set of consec good bases
+    j = len(q_good)
+    while j >= consec and not q_good[j - consec:j].all():
+        j -= 1
+
+    # Write out trimmed sequence
+    with open(out_file, 'w') as f:
+        Bio.SeqIO.write(seq[i:j], f, 'fastq')
+
+
+def convert_ab1(ab1_dir):
+    """
+    Convert all *.ab1 files in input directory to trimmed fastq sequences.
+    Write result to new fastq files in 'fastq' directory.
+    :param ab1_dir: Path to directory containing ab1 files.
+    :return:
+    """
+    fastq_dir = 'fastq'
+    mkdir_p(fastq_dir)
+
+    # Get all the .ab1 files in the directory (glob module is convenient!)
+    listing = glob.glob(os.path.join(ab1_dir, '*.ab1'))
+
+    # Go through each file in the chromatogram directory and convert it to FASTQ
+    for fname in listing:
+        # Get the prefix of the file
+        prefix = os.path.splitext(os.path.split(fname)[-1])[0]
+
+        # Make the name of the output FASTQ file
+        fastq_fname = os.path.join(fastq_dir, prefix + '.fastq')
+
+        # Use Biopython to convert file format
+        Bio.SeqIO.convert(fname, 'abi', fastq_fname, 'fastq')
+
+    # Get a list of fastq in the chromatogram directory
+    listing = glob.glob(os.path.join(fastq_dir, '*.fastq'))
+
+    # Loop through and trim all FASTQ files
+    for fname in listing:
+        if 'trimmed' not in fname:
+            prefix, suffix = os.path.splitext(fname)
+            trim_fastq_biopython(fname, prefix + '_trimmed.fastq')
+
+
+def needle_align(fqname, argsref):
+    prefix, suffix = os.path.splitext(fqname)
+    outname = prefix + '.aln'
+    needle_cline = NeedleallCommandline(r'/opt/emboss/bin/needleall', bsequence=fqname, asequence=argsref,
+                                        verbose=False, gapopen=15, gapextend=0.5,
+                                        outfile=outname, aformat='fasta')
+    needle_cline()
+
+    for pair in Bio.AlignIO.parse(outname, "fasta", alphabet=Bio.Alphabet.IUPAC.ambiguous_dna, seq_count=2):
+        ref = pair[0].seq.tomutable()
+        read = pair[1].seq
+        read = MutableSeq(str(read).replace('N', '.'), read.alphabet)
+        id = pair[1].id
+
+    ref, read = trim_read(ref, read)
+
+    return ref, read, id
+
+def trim_read(ref, read):
+    """
+    In Sanger sequencing the read will likely extend beyond the gene reference. Trim both to reference length.
+    :param ref: MutableSeq for the Sanger read
+    :param read: MutableSeq with the reference sequence
+    :return: trimmed ref & read
+    """
+    start, end = 0, len(ref)
+
+    # trim start
+    for i in range(len(ref)):
+        if ref[i] != '-':
+            start = i
+            break
+    for i in range(len(ref), 1, -1):
+        if ref[i-1] != '-':
+            end = i
+            break
+
+    return ref[start:end], read[start:end]

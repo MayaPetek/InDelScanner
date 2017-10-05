@@ -5,7 +5,7 @@
 2. Generate all possible 3/6/9 bp deletions on them as reads
 3. Print in format compatible with needle
 (4. Process with needle in case alignment reshuffles bases)
-(5. indels.py)
+(5. count_one_lane.py)
 """
 
 import sys

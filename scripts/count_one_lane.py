@@ -6,16 +6,19 @@ import argparse
 
 from collections import defaultdict
 
-from functions import loadCounts, saveCounts, prepareCounts, findErrors, verifyRead
-from outputUtils import printDiff
-
 from Bio import SeqIO, AlignIO
 from Bio.Alphabet import IUPAC
 from Bio.Data import CodonTable
 from Bio.Seq import MutableSeq
 
+from indels.ind import load_counts, save_counts, prepare_counts, verifyRead, findErrors,
 
-def countOneAlignment():
+from indels.reads import verifyRead
+from indels.output import printDiff
+from indels.errors import findErrors
+
+
+def countOneAlignment(MAX_ERRORS, MATCH_N_END):
     """
     1. Read reference file
     2. Scan over reference sequence to generate all possible mutations
@@ -31,24 +34,28 @@ def countOneAlignment():
             sys.version_info[0], sys.version_info[1], sys.version_info[2])
         sys.exit(1)
 
+    # define valid codons
     codons = list(CodonTable.unambiguous_dna_by_name["Standard"].forward_table.keys())
     codons += CodonTable.unambiguous_dna_by_name["Standard"].stop_codons
+    codons_with_del = codons + ['---']
 
     reference = SeqIO.read(args.reference, 'fasta', alphabet=IUPAC.ambiguous_dna)
 
     MAX_ERROR_INDEX = len(reference) - 1
 
     try:
-        valid_counts = loadCounts(reference, '.counts.p')
+        valid_counts = load_counts(reference, '.counts.p')
         print("Imported counts")
     except IOError:
         print("Making counts")
-        valid_counts = saveCounts(reference, '.counts.p')
+        valid_counts = save_counts(reference, '.counts.p')
 
+    # dictionaries to store problematic mutations
+    bad_counts = defaultdict(int)
     all_counts = defaultdict(int)
     rejected = defaultdict(int)
 
-    ctr=0 # counter for DEBUG printing
+    ctr = 0 # counter for DEBUG printing
     
     # reading & looping over read/reference sequence in multiple sequence alignment
     # use AlignIO parser and keep sequence only, allowing it to change (important for gap shifts) 
@@ -56,6 +63,7 @@ def countOneAlignment():
 
         ctr += 1
 
+        # both read and ref are MutableSeq
         ref = pair[0].seq.tomutable()
         read = pair[1].seq
         read = MutableSeq(str(read).replace('N', '.'), read.alphabet)
@@ -77,11 +85,13 @@ def countOneAlignment():
 
         # count up all errors in one massive dictionary
         elif len(errors) > 1:
-            all_counts[errors] += 1
+            #all_counts[errors] += 1
             if errors[0] in valid_counts.keys():
-                    valid_counts[errors[0]].insert(errors)
+                valid_counts[errors[0]].insert(errors)
+            else:
+                bad_counts[errors] += 1
 
-    return valid_counts, all_counts
+    return valid_counts, all_counts, rejected
 
 if __name__ == "__main__":
     """
@@ -113,7 +123,7 @@ if __name__ == "__main__":
     #   to move 1 or 2 bases over to the next triplet
     MATCH_N_END = 3
 
-    valid_counts, all_counts = countOneAlignment()
+    valid_counts, all_counts = countOneAlignment(MAX_ERRORS, MATCH_N_END)
 
     with open(args.output + '.valid_counts.p', 'wb') as f:
         pickle.dump(valid_counts, f)

@@ -57,3 +57,9 @@ def printDiff(errors, read, ref, id, ctr, PRINT_COLOURED_DIFF):
     print("Read: %i " % ctr)
     print("Read ID: %i \n" % id)
     printErrors(errors, read, ref, PRINT_COLOURED_DIFF)
+
+def printSummary(dictionary, keys):
+    print(','.join(keys))
+    for mutation, counts in sorted(dictionary.items()):
+        s = [str(counts.get(library)) for library in keys[1:]]
+        print(mutation, ','.join(s), sep=",")

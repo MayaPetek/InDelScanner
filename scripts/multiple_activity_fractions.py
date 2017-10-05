@@ -15,94 +15,8 @@ from Bio.Alphabet import IUPAC
 import random
 import matplotlib.pyplot as pyplot
 
-def set_up_total(reference):
-    """
-    Find the pre-prepared counts for gene reference, load it and prepare a dictionary
-    :param reference: fasta file. Expect a corresponding reference.counts.p, output of prepareCounts & saveCounts.
-    :return: dictionary descrbies everything know about a mutation
-             total['type]['counts'/'depth'//'protein'/'exp_activity'/'pred_activity']
-    """
-    valid_counts = loadCounts(reference, '.counts.p')
-    total = {}
-    for t in valid_counts.keys():
-        total[t] = {}
-        for e in valid_counts[t].keys():
-            total[t][e] = {'counts': {}, 'depth': {}, 'protein': '', 'exp_activity': '', 'pred_activity': ''}
-    return total
 
 
-def get_experimental_data():
-    """
-    If experimental data is provided, collect that data into a dictionary
-    The file is CSV format with header, columns give start & end of deletion, activity (float) and protein effect
-    If no data is provided, return empty dictionary.
-    :return: experimental[errors]{'activity': float, 'protein': string}
-    """
-
-    experimental = {}
-    rejected = defaultdict(int)
-    codons = list(CodonTable.unambiguous_dna_by_name["Standard"].forward_table.keys())
-    codons += CodonTable.unambiguous_dna_by_name["Standard"].stop_codons
-
-    if not args.experimental:
-        return experimental
-
-    with open(args.experimental, 'r') as f:
-        lit = csv.DictReader(f, dialect='excel')
-        ref = reference.seq.upper().tomutable()
-        r = str(ref)
-        start, end, activity, protein = lit.fieldnames
-
-        for line in lit:
-            s = int(line.get(start))
-            e = int(line.get(end))
-            a = float(line.get(activity))
-            length = e - s
-            read = MutableSeq(r[:s] + ("-" * length) + r[e:], ref.alphabet)
-            errors = findErrors(read, ref, rejected, codons, MAX_ERROR_INDEX=720)
-            experimental[errors] = {'activity': a, 'protein': line.get(protein)}
-
-    return experimental
-
-def calculate_depth(depth_1, depth_2):
-    """
-    Collect samtools depth output into a list. 2nd column = 1-based position, 3rd column = coverage.
-    Samtools gives two separate files for assembled and unassembled reads
-    :param depth_file: output of samtools depth, tab delimited
-    :return: a list of ints with coverage per position
-    """
-
-    depth = []
-    # depth of assembled and unassembled reads is in two separate files
-    with open(depth_1, 'r') as f:
-        for line in f.readlines():
-            l = line.split()
-            # depth in third column, 'samtools depth' output
-            depth.append(int(l[2]))
-    # open second file and add the count to same position in depth list
-    with open(depth_2, 'r') as f:
-        for line in f.readlines():
-            l = line.split()
-            i = int(l[1]) - 1
-            depth[i] += int(l[2])
-    return depth
-
-def average_depth(errors, depth):
-    """
-    Use errors description to find which nucleotides it fits in, average coverage over that sequence.
-    Includes positions in the mutations codons that don't change themselves.
-    :param errors: a tuple describing a set of mutations
-    :param depth: a list giving coverage per nucleotide position, eg. depth[16]=3378
-    :return: a float giving average coverage for this mutation
-    """
-    # to allow non-consecutive mutations
-    e_depth = []
-    nt = len(errors) - 1
-    for i in range(1,nt,3):
-        start = int(errors[i])
-        e_depth += depth[start:start+3]
-    avg = sum(e_depth) / nt
-    return avg
 
 def error_to_protein(errors):
     """
@@ -327,14 +241,25 @@ def total_protein(total):
     :param total: contains all mutations in the format total['d'][error tuple]['pred_activity']
     :return:
     """
-    protein  = {k:{} for k in total.keys()}
-    protein['wt'] = {}
+
+    protein = {}
     for k in total.keys():
         for errors in total[k]:
-            prot_key = classify_protein(errors)
             prot_errors = error_to_protein(errors)
-            protein[prot_key][prot_errors] = {'protein': total[k][errors]['protein'],
-                                         'pred_activity': total[k][errors]['pred_activity']}
+            protein[prot_errors] = {'protein': total[k][errors]['protein'],
+                                    'pred_activity': total[k][errors]['pred_activity'],
+                                    'type': classify_protein(errors),
+                                    'counts': total[k][errors]['counts']
+                                    }
+
+    # protein  = {k:{} for k in total.keys()}
+    # protein['wt'] = {}
+    # for k in total.keys():
+    #     for errors in total[k]:
+    #         prot_key = classify_protein(errors)
+    #         prot_errors = error_to_protein(errors)
+    #         protein[prot_key][prot_errors] = {'protein': total[k][errors]['protein'],
+    #                                      'pred_activity': total[k][errors]['pred_activity']}
     return protein
 
 def sub_that_change_del(protein):

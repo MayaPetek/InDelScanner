@@ -24,13 +24,18 @@ if sys.version_info[0] < 3:
 4. Print these N nt to fasta as many times as the original deletion was observed
 (5. Later - create consensus sequence weighed by number of occurences)
 """
-parser = argparse.ArgumentParser(description='A script to find and counts all 3 bp substitutions and 3/6/9 bp deletions in a gene from a multiple alignment')
-parser.add_argument('-c','--counts', help='CSV file with 1 column giving position and 2nd counts of deletions',required=True)
-parser.add_argument('-r','--reference', help='Reference fasta file with with the alignment was constructed', required=True)
-parser.add_argument('-o','--output',help='Output file name', required=True)
-args = parser.parse_args()
 
-def main():
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(
+        description='A script to find and counts all 3 bp substitutions and 3/6/9 bp deletions in a gene from a multiple alignment')
+    parser.add_argument('-c', '--counts', help='CSV file with 1 column giving position and 2nd counts of deletions',
+                        required=True)
+    parser.add_argument('-r', '--reference', help='Reference fasta file with with the alignment was constructed',
+                        required=True)
+    parser.add_argument('-o', '--output', help='Output file name', required=True)
+    args = parser.parse_args()
+
     """ Read in a list of counts per position in the format:
     0-based position, count of d3 at this position in eGFP, count in GFP8
     All counts have been corrected for coverage
@@ -54,4 +59,4 @@ def main():
             
 
 
-main()        
+
