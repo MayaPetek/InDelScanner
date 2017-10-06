@@ -2,9 +2,10 @@
 
 import pickle
 import argparse
+import random
+import sys
 import csv
 
-from functions import loadCounts, findErrors, classify_protein, classify_point_protein
 from collections import defaultdict
 
 from Bio import SeqIO
@@ -12,47 +13,93 @@ from Bio.Seq import Seq, MutableSeq
 from Bio.Data import CodonTable
 from Bio.Alphabet import IUPAC
 
-import random
 import matplotlib.pyplot as pyplot
 
+sys.path.insert(0, "/home/maya/Install/Acids")
+from indels.ind import set_up_total, mutation_to_protein_notation, classify_mutation, find_dna_mutations, \
+    calculate_depth, average_depth
 
-
-
-def error_to_protein(errors):
+def get_experimental_data(args, reference):
     """
-    The first position in errors classifies a mutation on DNA level, eg. 'sd'. Then come groups of 3:
-    DNA position, reference codon, actual codon
-    This attempts to translate both codons and compares them to find the effect of mutation on the protein
-    :param errors: tuple describing a mutation, output of findErrors
-    :return: string in standard protein mutation, eg. S22A/K23Δ . Δ=amino acid deletion.
+    If experimental data is provided, collect that data into a dictionary
+    The file is in CSV format with header, columns give start & end of deletion, activity (float) and protein effect
+    If no data is provided, return empty dictionary.
+    :param args: arguments processed with argparse, must include args.experimentsl (a csv file)
+    :return: experimental[errors]{'activity': float, 'protein': string}
     """
-    protein = []
-    for i in range(1, len(errors), 3):
-        dna_pos = int(errors[i])
-        dna_ref = Seq(errors[i+1], alphabet=IUPAC.ambiguous_dna)
-        dna_mut = Seq(errors[i+2], alphabet=IUPAC.ambiguous_dna)
-        try:
-            prot_pos = str(int(dna_pos / 3 + 1))
-            prot_ref = str(dna_ref.translate())
-            prot_mut = str(dna_mut.translate())
-        except CodonTable.TranslationError:
-            if dna_mut == '---':
-                prot_mut = 'Δ'
-        if prot_ref == prot_mut:
-            continue
-        protein.append(prot_ref + prot_pos + prot_mut)
 
-    return '/'.join(protein)
+    exp_data = {}
+    rejected = defaultdict(int)
 
-def predict_activity(errors, total):
+    if not args.experimental:
+        return exp_data
+
+    with open(args.experimental, 'r') as f:
+        lit = csv.DictReader(f, dialect='excel')
+        ref = reference.seq.upper().tomutable()
+        r = str(ref)
+        start, end, activity, protein = lit.fieldnames
+
+        for line in lit:
+            s = int(line.get(start))
+            e = int(line.get(end))
+            a = float(line.get(activity))
+            length = e - s
+            read = MutableSeq(r[:s] + ("-" * length) + r[e:], ref.alphabet)
+            errors = find_dna_mutations(read, ref, rejected, MAX_ERROR_INDEX=720)
+            exp_data[errors] = {'activity': a, 'protein': line.get(protein)}
+    print("Loaded experimental data")
+
+    return exp_data
+
+
+def get_sequencing_data(files, total, experimental):
     """
-    Use entries in total[errors[0]][errors] to predict activity
+    The input file in args.file lists where counts & depth data is located:
+    line = name,counts file loc,depth file loc, depth 2 file loc, activity (H/N/MM/L)
+    Read in all mutations, predict activity and place them in total.
+    :param total: at first empty dictionary with keys for all expected mutations
+    :return: added all known information about expected mutations
+    """
+    # input file need: path to counts file, fraction name
+    with open(files, 'r') as f:
+        for line in  f.readlines():
+            # name = H/N/L/MM, denotes activity fraction
+            name, count_loc, depth1_loc, depth2_loc = line.rstrip().split(',')
+            depth = calculate_depth(depth1_loc, depth2_loc)
+            # load individual counts
+            with open(count_loc, 'rb') as p:
+                counts = pickle.load(p)
+
+            # read all data into t
+            for errors in counts.keys():
+                if len(errors) == 0:
+                    continue
+                total[errors]['depth'][name] = average_depth(errors, depth)
+                total[errors]['counts'][name] = counts[errors]
+                total[errors]['protein_mutation'] = mutation_to_protein_notation(errors)
+                total[errors]['dna_type'] = classify_mutation(errors, style='dna')
+                total[errors]['protein_type'] = classify_mutation(errors, style='protein')
+                if errors in experimental:
+                    total[errors]['exp_activity'] = experimental[errors]['activity']
+                else:
+                    total[errors]['exp_activity'] = None
+    return total
+
+
+def predict_activity(total):
+    """
+    Use entries in total [errors] to predict activity
     - pred_activity: H/M/L, whichever has the highest frequency of observing this mutation
     - confidence: 0 for N<5, 1 for 6 <= N < 10, 2 for 11 <= N < 20, 3 for 21 <= N < 50, 4 for <= N < 100, 5 for 100 <= N
     :param errors: which mutation to look up
     :param total: total = full DNA dictionary, must contain all information at this point
     :return: tuple (H/M/L, confidence) where confidence is an int
     """
+    # once all fractions are in total, compare H/MM/L/N counts to get an overall prediction
+    for m in total.keys():
+        for errors in total[m].keys():
+            total[m][errors]['pred_activity'] = predict_activity(errors, total)
 
     # make a dictionary: enrichment - fraction, eg. 1.80:H, 0.1:MM, 0.0: L
     enrichment = {}
@@ -88,47 +135,6 @@ def predict_activity(errors, total):
         pred_activity = ''
 
     return (pred_activity, pred_confidence)
-
-
-def get_sequencing_data(total):
-    """
-    The input file in args.file lists where counts & depth data is located:
-    line = name,counts file loc,depth file loc, depth 2 file loc, activity (H/N/MM/L)
-    Read in all mutations, predict activity and place them in total.
-    :param total: at first empty dictionary with keys for all expected mutations
-    :return: added all known information about expected mutations
-    """
-    # input file need: path to counts file, fraction name
-    with open(args.files, 'r') as f:
-        for line in  f.readlines():
-            # name = H/N/L/MM, denotes activity fraction
-            name, count_loc, depth1_loc, depth2_loc = line.rstrip().split(',')
-            depth = calculate_depth(depth1_loc, depth2_loc)
-            # load individual counts
-            with open(count_loc, 'rb') as p:
-                counts = pickle.load(p)
-
-            # read all data into t
-            for t in counts.keys():
-                for errors, number in counts[t].items():
-                    if len(errors) == 1:
-                        continue
-                    total[t][errors]['depth'][name] = average_depth(errors, depth)
-                    total[t][errors]['counts'][name] = number
-                    total[t][errors]['protein'] = error_to_protein(errors)
-
-                    if errors in experimental:
-                        total[t][errors]['exp_activity'] = experimental[errors]['activity']
-                    else:
-                        total[t][errors]['exp_activity'] = None
-
-    # once all fractions are in total, compare H/MM/L/N counts to get an overall prediction
-    for m in total.keys():
-        for errors in total[m].keys():
-            total[m][errors]['pred_activity'] = predict_activity(errors, total)
-
-    return total
-
 
 def generate_experimental_points():
     """
@@ -233,35 +239,6 @@ def print_pymol(fraction, dictionary):
     return f
 
 
-def total_protein(total):
-    """
-    Total is a large dictionary that contains all sequencing data on DNA level. Some substitutions are between synonymous
-    codons and therefore have no effect on amino acids. An 'sd' mutation on DNA might be a 'd' when translated.
-    This function goes through the entire DNA dictionary and redoes it based on protein effect.
-    :param total: contains all mutations in the format total['d'][error tuple]['pred_activity']
-    :return:
-    """
-
-    protein = {}
-    for k in total.keys():
-        for errors in total[k]:
-            prot_errors = error_to_protein(errors)
-            protein[prot_errors] = {'protein': total[k][errors]['protein'],
-                                    'pred_activity': total[k][errors]['pred_activity'],
-                                    'type': classify_protein(errors),
-                                    'counts': total[k][errors]['counts']
-                                    }
-
-    # protein  = {k:{} for k in total.keys()}
-    # protein['wt'] = {}
-    # for k in total.keys():
-    #     for errors in total[k]:
-    #         prot_key = classify_protein(errors)
-    #         prot_errors = error_to_protein(errors)
-    #         protein[prot_key][prot_errors] = {'protein': total[k][errors]['protein'],
-    #                                      'pred_activity': total[k][errors]['pred_activity']}
-    return protein
-
 def sub_that_change_del(protein):
     """
     Look for substitutions that change the effect of deletions.
@@ -313,16 +290,16 @@ if __name__ == "__main__":
     reference = SeqIO.read(args.reference, 'fasta', alphabet=IUPAC.ambiguous_dna)
     total = set_up_total(reference)
 
-    experimental = get_experimental_data()
-    total = get_sequencing_data(total)
-    protein = total_protein(total)
+    experimental = get_experimental_data(args, reference)
+    total = get_sequencing_data(args.files, total, experimental)
 
-    eGFP = {'total': total, 'protein': protein}
-    with open('eGFP.p', 'wb') as f:
-        pickle.dump(eGFP, f)
+    n = 0
+    for errors in total.keys():
+        if total[errors]['counts'] != {}:
+            n += 1
+    print('Found', n, 'mutations')
 
     # points = generate_experimental_points()
-    #
     # plot_known_mutations(points)
     #
     # for k in ('d', 'dd', 'ddd', 'sd', 'sdd', 'sddd'):

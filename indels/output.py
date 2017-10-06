@@ -52,7 +52,7 @@ def printErrors(errors, read, ref, colouredDiff):
                 
         print()
 
-def printDiff(errors, read, ref, id, ctr, PRINT_COLOURED_DIFF):
+def print_coloured_diff(errors, read, ref, id, ctr, PRINT_COLOURED_DIFF):
     print("\n\n#############################################################################")
     print("Read: %i " % ctr)
     print("Read ID: %i \n" % id)

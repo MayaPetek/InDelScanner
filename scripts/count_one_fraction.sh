@@ -14,10 +14,12 @@ totalFile="$6"
 
 set -e
 
+export PATH=$PATH:/home/maya/Install/Acids/indels
+
 # Check if an alignment already exists
 if [ -s $baseName.aln ]; then
     echo -e "\nAn alignment with this output name already exists. Calling mutations now!"
-    time $acids/compareAcids/indels.py -a $baseName.aln -r $referenceFileBase.fa -o $baseName
+    /home/maya/Install/Acids/scripts/count_one_lane.py -a $baseName.aln -r $referenceFileBase.fa -o $baseName
     echo -e "$activity,$baseName.valid_counts.p,$baseName.assembled.depth.txt,$baseName.unassembled.depth.txt" >> $totalFile
     exit
 
@@ -99,7 +101,7 @@ else
 
 
     echo -e "\nCalling mutations"
-    time $acids/compareAcids/indels.py -a $baseName.aln -r $referenceFileBase.fa -o $baseName
+    time /home/maya/Install/Acids/scripts/count_one_lane.py -a $baseName.aln -r $referenceFileBase.fa -o $baseName
     echo -e "$activity,$baseName.valid_counts.p,$baseName.assembled.depth.txt,$baseName.unassembled.depth.txt" >> $totalFile
     echo -e "Found the mutations"
 

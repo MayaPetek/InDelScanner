@@ -16,18 +16,10 @@ import os
 
 from collections import defaultdict
 
-import numpy as np
-
 from Bio import SeqIO
-from Bio import AlignIO
 from Bio.Alphabet import IUPAC
-from Bio.Data import CodonTable
 
-
-# from Bio.Seq import MutableSeq
-
-
-from indels.ind import findErrors, error_to_protein, convert_ab1, needle_align, get_codons
+from indels.ind import find_dna_mutations, mutation_to_protein_notation, convert_ab1, needle_align, get_codons
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -45,13 +37,11 @@ if __name__ == "__main__":
     listing = listing = glob.glob(os.path.join('fastq', '*_trimmed.fastq'))
     rejected = defaultdict(int)
 
-
-
     for fqname in listing:
         ref, read, id = needle_align(fqname, args.reference)
-        errors = findErrors(read, ref, rejected, codons_with_deletions, 720)
+        errors = find_dna_mutations(read, ref, rejected, 720)
 
-        protein = error_to_protein(errors)
+        protein = mutation_to_protein_notation(errors)
         if protein == '':
             protein = "WT"
 
