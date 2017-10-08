@@ -88,7 +88,7 @@ def prepare_counts(reference):
     deletion = [3, 6, 9]
     codons = get_codons(withdeletions=False)
 
-    interesting = ('', 's', 'ss', 'd', 'sd', 'dd', 'sdd', 'ddd', 'sddd')
+    interesting = ('wt', 's', 'ss', 'd', 'sd', 'dd', 'sdd', 'ddd', 'sddd')
     counts = {}
 
     rejected = defaultdict(int)  # create keys as new mistakes are found
@@ -111,14 +111,14 @@ def prepare_counts(reference):
             if t in interesting:
                 counts[errors] = 0
             else:
-                print(errors)
+                print(t, errors)
+    print("Finished making deletions")
 
     # MAKE SUBSTITUTIONS
-    for t in codons:
+    for c in codons:
         for i in range(len(ref) - 3):
-            possibleread = MutableSeq(r[:i] + t + r[i + 3:],
-                                      ref.alphabet)
-            if not verifyRead(possibleread, ref, rejected):
+            possibleread = MutableSeq(r[:i] + c + r[i + 3:], ref.alphabet)
+            if not verifyRead(possibleread, ref, rejected, MATCH_N_END=3):
                 continue
             errors = find_dna_mutations(possibleread, ref, rejected)
 
@@ -126,7 +126,8 @@ def prepare_counts(reference):
             if t in interesting:
                 counts[errors] = 0
             else:
-                print(errors)
+                print(t, errors)
+    print("Finished making substutions")
 
     return counts
 
@@ -139,7 +140,6 @@ def get_counts(reference, suffix):
     :return: dictionary {errors: 0} for all interesting muttions
     """
     try:
-        print(reference.name)
         with open(reference.name + suffix, 'rb') as f:
             valid_counts = pickle.load(f)
         print("Imported counts")
