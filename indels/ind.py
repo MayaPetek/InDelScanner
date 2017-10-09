@@ -88,7 +88,7 @@ def prepare_counts(reference):
     deletion = [3, 6, 9]
     codons = get_codons(withdeletions=False)
 
-    interesting = ('wt', 's', 'ss', 'd', 'sd', 'dd', 'sdd', 'ddd', 'sddd')
+    interesting = ('s', 'ss', 'd', 'sd', 'dd', 'sdd', 'ddd', 'sddd')
     counts = {}
 
     rejected = defaultdict(int)  # create keys as new mistakes are found
@@ -167,6 +167,66 @@ def set_up_total(reference):
         total[errors] = {'counts': {}, 'depth': {}, 'index': i}
         i += 1
     print("Set up total")
+
+    return total
+
+
+def get_sequencing_data(files, total, experimental):
+    """
+    The input file in args.file lists where counts & depth data is located:
+    line = name,counts file loc,depth file loc, depth 2 file loc, activity (H/N/MM/L)
+    Read in all mutations, predict activity and place them in total.
+    :param total: at first empty dictionary with keys for all expected mutations
+    :return: added all known information about expected mutations
+    """
+    # input file need: path to counts file, fraction name
+    with open(files, 'r') as f:
+        for line in  f.readlines():
+            # name = H/N/L/MM, denotes activity fraction
+            name, count_loc, depth1_loc, depth2_loc = line.rstrip().split(',')
+            depth = calculate_depth(depth1_loc, depth2_loc)
+            # load individual counts
+            with open(count_loc, 'rb') as p:
+                counts = pickle.load(p)
+
+            # read all data into t
+            i = 0
+            for errors in counts.keys():
+                if len(errors) == 0:
+                    continue
+                total[errors]['depth'][name] = average_depth(errors, depth)
+                total[errors]['counts'][name] = counts[errors]
+                if counts[errors] != 0:
+                    i +=1
+                total[errors]['protein_mutation'] = mutation_to_protein_notation(errors)
+                total[errors]['dna_type'] = classify_mutation(errors, style='dna')
+                total[errors]['protein_type'] = classify_mutation(errors, style='protein')
+                if errors in experimental:
+                    total[errors]['exp_activity'] = experimental[errors]['activity']
+                else:
+                    total[errors]['exp_activity'] = None
+
+            print("Found", i, "mutations in", name, "fraction")
+    return total
+
+
+def get_total(files_name, experimental, reference=None):
+    """
+    Retrieve a 'total' dictionary with all saved data
+    :param files_name:
+    :return:
+    """
+    try:
+        with open(files_name + '.total.p', 'rb') as f:
+            total = pickle.load(f)
+        print("Imported collected counts")
+    except IOError:
+        print("Importing sequencing data")
+        total = set_up_total(reference)
+        total = get_sequencing_data(files_name, total, experimental)
+        with open(files_name + '.total.p', 'wb') as f:
+            pickle.dump(total, f)
+        print("Finished importing sequencing data")
 
     return total
 
