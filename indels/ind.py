@@ -194,6 +194,7 @@ def get_sequencing_data(files, total, experimental):
             for errors in counts.keys():
                 if len(errors) == 0:
                     continue
+                total[errors]['dna_position'] = int(errors[0])
                 total[errors]['depth'][name] = average_depth(errors, depth)
                 total[errors]['counts'][name] = counts[errors]
                 if counts[errors] != 0:
@@ -217,14 +218,14 @@ def get_total(files_name, experimental, reference=None):
     :return:
     """
     try:
-        with open(files_name + '.total.p', 'rb') as f:
+        with open(files_name + '.total_no_prediction.p', 'rb') as f:
             total = pickle.load(f)
         print("Imported collected counts")
     except IOError:
         print("Importing sequencing data")
         total = set_up_total(reference)
         total = get_sequencing_data(files_name, total, experimental)
-        with open(files_name + '.total.p', 'wb') as f:
+        with open(files_name + '.total_no_prediction.p', 'wb') as f:
             pickle.dump(total, f)
         print("Finished importing sequencing data")
 

@@ -3,6 +3,7 @@
 import argparse
 import random
 import sys
+import pickle
 import csv
 
 from collections import defaultdict
@@ -11,7 +12,10 @@ from Bio import SeqIO
 from Bio.Seq import MutableSeq
 from Bio.Alphabet import IUPAC
 
-import matplotlib.pyplot as pyplot
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+from sklearn import decomposition
 
 sys.path.insert(0, "/home/maya/Install/Acids")
 from indels.ind import classify_mutation, find_dna_mutations, get_total, classify_point_protein
@@ -112,9 +116,9 @@ def generate_experimental_points(experimental, total):
     """
 
     # set color maps
-    green_map = pyplot.cm.get_cmap('Greens')
-    yellow_map = pyplot.cm.get_cmap('Blues')
-    red_map = pyplot.cm.get_cmap('Reds')
+    green_map = plt.cm.get_cmap('Greens')
+    yellow_map = plt.cm.get_cmap('Blues')
+    red_map = plt.cm.get_cmap('Reds')
     # confidence is an integer in range [0, 1, 2, 3, 4, 5]
     colors = {'H': [green_map(i/10) for i in range(3, 9, 1)],
               'MM': [yellow_map(i/10) for i in range(3, 9, 1)],
@@ -143,17 +147,17 @@ def plot_known_mutations(points):
     y - experimental fluorescence, log scale
     c - colour, red = low, blue = medium, green = high. Intensity indicates confidence.
     """
-    pyplot.figure(1)
-    pyplot.scatter(points['x'], points['y'], c=points['c'])
-    pyplot.yscale('symlog', linthreshy=0.02)
-    pyplot.axhline(y=0.05, color='k', linewidth=1)
-    pyplot.axhline(y=0.005, color='k', linewidth=1)
-    pyplot.ylabel('Log % eGFP fluorescence')
-    pyplot.xticks([])
+    plt.figure(1)
+    plt.scatter(points['x'], points['y'], c=points['c'])
+    plt.yscale('symlog', linthreshy=0.02)
+    plt.axhline(y=0.05, color='k', linewidth=1)
+    plt.axhline(y=0.005, color='k', linewidth=1)
+    plt.ylabel('Log % eGFP fluorescence')
+    plt.xticks([])
     return
 
 
-def pymol_residues(errors):
+def pymol_helper(errors):
     """
     Which residues in a mutation actually affect the protein. Deliberately ignores synonymous mutations.
     Reports 1st amino acid for d/dd/ddd and 2nd amino acid for sd/sdd/sddd
@@ -185,7 +189,7 @@ def pymol_resi_list(fraction, total):
     Return a dictionary with a list of residues for Pymol plotting.
     Fraction describes the mutation type on protein level, eg. 'sd'
     """
-    f = {'H': [], 'MM': [], 'L': []}
+    fractions = {'H': [], 'MM': [], 'L': []}
 
     for e in total.keys():
         if e == ():
@@ -194,13 +198,13 @@ def pymol_resi_list(fraction, total):
             # add location to f, a[0] is prediction of activity, a[1] is confidence
             a = total[e]['pred_activity']
             if a[0] != '' and a[1] > 1:
-                if pymol_residues(e) != '':
-                    f[a[0]].append(pymol_residues(e))
+                if pymol_helper(e) != '':
+                    fractions[a[0]].append(pymol_helper(e))
 
-    for frac, resi in f.items():
-        f[frac] = sorted(set(resi))
+    for frac, resi in fractions.items():
+        fractions[frac] = sorted(set(resi))
 
-    return f
+    return fractions
 
 
 def find_epistatic_combinations(total, cutoff, output):
@@ -246,6 +250,89 @@ def find_epistatic_combinations(total, cutoff, output):
     return
 
 
+def calculate_enrichement(e, total):
+    """
+    Helper function to calculate enrichments for all fractions relative to baseline
+    :param e: which mutation
+    :param total: dictionary with all sequencing data
+    :return: {'H': float, 'L': float etc.}
+    """
+
+    N_freq = total[e]['counts']['N'] / total[e]['depth']['N']
+
+    if N_freq == 0:
+        return {}
+
+    enrichments = {}
+    for frac in total[e]['counts'].keys():
+        if frac == 'N':
+            continue
+        frac_freq = total[e]['counts'][frac] / total[e]['depth'][frac]
+        enrichments[frac] = frac_freq / N_freq
+
+    return enrichments
+
+def generate_training(experimental, total):
+    """
+    Prepare np arrays for all mutants for which activity is known.
+    :param experimental:
+    :param total:
+    :return:
+    """
+    no_points = len(experimental.keys())
+    # start with lists
+    X_training = []
+    y_training = []
+
+    classes = {'L': 0, 'MM': 1, 'H': 2}
+    order = ['H', 'MM', 'L']
+
+    # add H/L/MM enrichements to X and measured activity to y
+    for e in experimental.keys():
+        enrich = calculate_enrichement(e, total)
+        if enrich == {}:
+            continue
+        entry = [enrich[fr] for fr in order]
+        X_training.append(entry)
+
+        a = experimental[e]['activity']
+        if a >= 1:
+            y_training.append(classes['H'])
+        elif a > 0:
+            y_training.append(classes['MM'])
+        elif a == 0:
+            y_training.append(classes['L'])
+
+    X_training = np.array(X_training)
+    y_training = np.array(y_training)
+
+    return X_training, y_training, order
+
+
+def pca_experimental(X_training, y_training, order, total):
+
+    pca = decomposition.PCA(n_components=2)  # keep 2 components, they explain 96% of variance
+    pca.fit(X_training)  # learn the coordinates
+    X_pca = pca.transform(X_training)
+
+    print(order)
+    print(pca.components_)
+    print()
+    print(pca.explained_variance_ratio_)
+
+    plt.figure()
+    colors = ['green', 'turquoise', 'red']
+    for color, i, target_name in zip(colors, [2, 1, 0], order):
+        plt.scatter(X_pca[y_training == i, 0], X_pca[y_training == i, 1], color=color, alpha=.8, lw=1,
+                    label=target_name)
+    plt.legend(loc='best', shadow=False, scatterpoints=1)
+    plt.title('Unscaled PCA of experimental data')
+    plt.xlabel('PCA 1')
+    plt.ylabel('PCA 2')
+    plt.show()
+
+    return X_pca, y_training, pca, order
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('-r', '--reference', help='Reference fasta file', required=True)
@@ -254,17 +341,27 @@ if __name__ == "__main__":
     parser.add_argument('-o', '--output', help='Name of output file', required=True)
     args = parser.parse_args()
 
+    # Import counts for individual fractions, of which one is 'N', the naive (unsorted) library
     reference = SeqIO.read(args.reference, 'fasta', alphabet=IUPAC.ambiguous_dna)
     experimental = get_experimental_data(args, reference)
     total = get_total(args.files, experimental, reference)
-    total = predict_activity(total)
 
-    find_epistatic_combinations(total, 2, args.output)
+    X_training, y_training, order = generate_training(experimental, total)
+    X_exp, y_exp, pca, order = pca_experimental(X_training, y_training, order, total)
+
+
+    # # Crude predictions
+    # total = predict_activity(total)
+    # find_epistatic_combinations(total, 2, args.output)
+    #
+    # # Save results
+    # with open(args.output + '.total_with_predictions.p', 'wb') as f:
+    #     pickle.dump(total, f)
 
     # # VALIDATION: PLOT PREDICTIONS FOR EXPERIMENTALLY TESTED MUTATIONS
     # points = generate_experimental_points(experimental, total)
     # plot_known_mutations(points)
-    # pyplot.show()
+    # plt.show()
 
     # # PYMOL HELPER SEQUENCE
     # pymol_dict = {}
