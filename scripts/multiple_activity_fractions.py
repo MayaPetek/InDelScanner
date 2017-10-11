@@ -14,7 +14,6 @@ from Bio.Alphabet import IUPAC
 
 import numpy as np
 import matplotlib.pyplot as plt
-import pandas as pd
 from sklearn import decomposition
 
 sys.path.insert(0, "/home/maya/Install/Acids")
@@ -27,6 +26,7 @@ def get_experimental_data(args, reference):
     The file is in CSV format with header, columns give start & end of deletion, activity (float) and protein effect
     If no data is provided, return empty dictionary.
     :param args: arguments processed with argparse, must include args.experimentsl (a csv file)
+    :param reference: SeqRecord of reference fasta file
     :return: experimental[errors]{'activity': float, 'protein': string}
     """
 
@@ -55,39 +55,36 @@ def get_experimental_data(args, reference):
     return exp_data
 
 
-def predict_activity(total):
+def predict_activity(total, style='depth', position_counts=None):
     """
     Use entries in total [errors] to predict activity
     - pred_activity: H/M/L, whichever has the highest frequency of observing this mutation
     - confidence: 0 for N<5, 1 for 6 <= N < 10, 2 for 11 <= N < 20, 3 for 21 <= N < 50, 4 for <= N < 100, 5 for 100 <= N
-    :param errors: which mutation to look up
     :param total: total = full DNA dictionary, must contain all information at this point
     :return: tuple (H/M/L, confidence) where confidence is an int
     """
 
     for e in total.keys():
-        # make an inverted dictionary: enrichment - fraction, eg. 1.80:H, 0.1:MM, 0.0: L
-        enrich = {}
         if e == ():
             continue
-        N_freq = total[e]['counts']['N'] / total[e]['depth']['N']
-
-        if N_freq == 0:
+        # make an inverted dictionary: enrichment - fraction, eg. 1.80:H, 0.1:MM, 0.0: L
+        enrichment = calculate_enrichment(e, total, position_counts=position_counts, style=style)
+        inverted = {}
+        if enrichment == {}:
             pred_activity = ''
         else:
-            for f in total[e]['counts'].keys():
-                if f == 'N':
-                    continue
-                frac_freq = total[e]['counts'][f] / total[e]['depth'][f]
-                enr_f = frac_freq / N_freq
-                enrich[enr_f] = f
-            max_activity = max(enrich.keys())
+            for f, value in enrichment.items():
+                inverted[value] = f
+            max_activity = max(inverted.keys())
             if max_activity == 0 :
                 pred_activity = ''
             else:
-                pred_activity = enrich[max_activity]
+                pred_activity = inverted[max_activity]
+
+
         # Add a confidence indicator to this prediction
         N = total[e]['counts']['N']
+
         if N > 100:
             pred_confidence = 5
         elif N > 50:
@@ -147,8 +144,8 @@ def plot_known_mutations(points):
     y - experimental fluorescence, log scale
     c - colour, red = low, blue = medium, green = high. Intensity indicates confidence.
     """
-    plt.figure(1)
-    plt.scatter(points['x'], points['y'], c=points['c'])
+    plt.figure()
+    plt.scatter(points['x'], points['y'], c=points['c'], marker='.')
     plt.yscale('symlog', linthreshy=0.02)
     plt.axhline(y=0.05, color='k', linewidth=1)
     plt.axhline(y=0.005, color='k', linewidth=1)
@@ -250,29 +247,113 @@ def find_epistatic_combinations(total, cutoff, output):
     return
 
 
-def calculate_enrichement(e, total):
+def count_mutations_per_position(total):
+    """
+    How many mutations are observed per position?
+    - s or d: add 1 to first nucleotide of errors. So (3, AAA, TTT) -> counts['dna'][3] +=1
+    - longer: (i, AAA, TTT, i+3, TTT, ---) -> counts[dna][i] += 1/2, same for i+3
+    Same idea for protein effect
+    :param total: Contains all observed DNA mutations, incl. dna effect
+    :return:
+    """
+    [e] = random.sample(total.keys(), 1)
+    fractions = total[e]['counts'].keys()
+    position_counts = {'protein': {f: {} for f in fractions}, 'dna': {f: {} for f in fractions}}
+
+    for e in total.keys():
+        if e == ():
+            continue
+
+        dna_len = len(total[e]['dna_type']) # number of codons affected
+        for f in fractions:
+            for i in range(0, dna_len):
+                try:
+                    position_counts['dna'][f][int(e[3*i])] += total[e]['counts'][f] / dna_len
+                except KeyError:
+                    position_counts['dna'][f][int(e[3*i])] = total[e]['counts'][f] / dna_len
+
+        # some substitutions have no effect on the protein, ignore them
+        if total[e]['protein_type'] == 'wt':
+            continue
+        prot_len = len(total[e]['protein_type'])
+        if prot_len == dna_len:
+            start = 0
+        else:
+            start = 1
+        for f in fractions:
+            for i in range(start, prot_len):
+                try:
+                    position_counts['protein'][f][int(float(e[3*i])/3) + 1] += total[e]['counts'][f] / prot_len
+                except KeyError:
+                    position_counts['protein'][f][int(float(e[3*i])/3) + 1] = total[e]['counts'][f] / prot_len
+
+    return position_counts
+
+def calculate_enrichment(e, total, position_counts=None, style='protein_mutations'):
     """
     Helper function to calculate enrichments for all fractions relative to baseline
     :param e: which mutation
     :param total: dictionary with all sequencing data
+    :param style: divide by depth or total number of mutations observed at this position
     :return: {'H': float, 'L': float etc.}
     """
+    assert style in ('depth', 'protein_mutations', 'dna_mutations')
 
-    N_freq = total[e]['counts']['N'] / total[e]['depth']['N']
+    if style == 'depth':
+        N_freq = total[e]['counts']['N'] / total[e]['depth']['N']
+        if N_freq == 0:
+            return {}
+        enrichments = {}
+        for f in total[e]['counts'].keys():
+            if f == 'N':
+                continue
+            frac_freq = total[e]['counts'][f] / total[e]['depth'][f]
+            enrichments[f] = frac_freq / N_freq
 
-    if N_freq == 0:
-        return {}
+    else:
+        assert position_counts is not None
+        if style == 'protein_mutations':
+            level = 'protein'
+            if total[e]['protein_type'] == 'wt': # eliminate wt single condon substitutions
+                return {}
+        else:
+            level = 'dna'
 
-    enrichments = {}
-    for frac in total[e]['counts'].keys():
-        if frac == 'N':
-            continue
-        frac_freq = total[e]['counts'][frac] / total[e]['depth'][frac]
-        enrichments[frac] = frac_freq / N_freq
+        # enrichement = (fraction count / fraction total ) / (N count / N total) = frac_freq / N_freq
+        # first calculate all single counts
+
+        dna_len = len(total[e]['dna_type'])  # number of codons affected
+        prot_len = len(total[e]['protein_type'])
+        start = 0
+        if (level == 'protein') and (dna_len != prot_len): # the substitution is wt; for 'ss' assign to second codon
+            start = 1
+        fraction_frequency = {}
+        for f in total[e]['counts'].keys():
+            frac_count = total[e]['counts'][f]
+            frac_total = 0
+            for i in range(start, prot_len):
+                frac_total += position_counts[level][f][int(float(e[3 * i]) / 3) + 1]
+            try:
+                fraction_frequency[f] = frac_count / frac_total
+            except ZeroDivisionError:
+                fraction_frequency[f] = 0
+
+        # convert individual frequencies to enrichment - X compared to naive library
+        enrichments = {}
+        if 'N' not in fraction_frequency.keys():
+            return {}
+        if fraction_frequency['N'] == 0:
+            return {}
+
+        for f in total[e]['counts'].keys():
+            if f == 'N':
+                continue
+            enrichments[f] = fraction_frequency[f] / fraction_frequency['N']
 
     return enrichments
 
-def generate_training(experimental, total):
+
+def generate_training(experimental, total, position_counts):
     """
     Prepare np arrays for all mutants for which activity is known.
     :param experimental:
@@ -289,14 +370,14 @@ def generate_training(experimental, total):
 
     # add H/L/MM enrichements to X and measured activity to y
     for e in experimental.keys():
-        enrich = calculate_enrichement(e, total)
+        enrich = calculate_enrichment(e, total, position_counts)
         if enrich == {}:
             continue
         entry = [enrich[fr] for fr in order]
         X_training.append(entry)
 
         a = experimental[e]['activity']
-        if a >= 1:
+        if a >= 0.5:
             y_training.append(classes['H'])
         elif a > 0:
             y_training.append(classes['MM'])
@@ -323,15 +404,14 @@ def pca_experimental(X_training, y_training, order, total):
     plt.figure()
     colors = ['green', 'turquoise', 'red']
     for color, i, target_name in zip(colors, [2, 1, 0], order):
-        plt.scatter(X_pca[y_training == i, 0], X_pca[y_training == i, 1], color=color, alpha=.8, lw=1,
-                    label=target_name)
+        plt.scatter(X_pca[y_training == i, 0], X_pca[y_training == i, 1], color=color, label=target_name, marker=".")
     plt.legend(loc='best', shadow=False, scatterpoints=1)
     plt.title('Unscaled PCA of experimental data')
     plt.xlabel('PCA 1')
     plt.ylabel('PCA 2')
-    plt.show()
 
     return X_pca, y_training, pca, order
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -346,26 +426,27 @@ if __name__ == "__main__":
     experimental = get_experimental_data(args, reference)
     total = get_total(args.files, experimental, reference)
 
-    X_training, y_training, order = generate_training(experimental, total)
+    position_counts = count_mutations_per_position(total)
+
+    X_training, y_training, order = generate_training(experimental, total, position_counts)
     X_exp, y_exp, pca, order = pca_experimental(X_training, y_training, order, total)
 
+    # Crude predictions
+    total = predict_activity(total, style='protein_mutations', position_counts=position_counts)
+    find_epistatic_combinations(total, 2, args.output)
 
-    # # Crude predictions
-    # total = predict_activity(total)
-    # find_epistatic_combinations(total, 2, args.output)
-    #
-    # # Save results
-    # with open(args.output + '.total_with_predictions.p', 'wb') as f:
-    #     pickle.dump(total, f)
+    # Save results
+    with open(args.output + '.total_with_predictions.p', 'wb') as f:
+        pickle.dump(total, f)
 
-    # # VALIDATION: PLOT PREDICTIONS FOR EXPERIMENTALLY TESTED MUTATIONS
-    # points = generate_experimental_points(experimental, total)
-    # plot_known_mutations(points)
-    # plt.show()
+    # VALIDATION: PLOT PREDICTIONS FOR EXPERIMENTALLY TESTED MUTATIONS
+    points = generate_experimental_points(experimental, total)
+    plot_known_mutations(points)
+    plt.show()
 
-    # # PYMOL HELPER SEQUENCE
-    # pymol_dict = {}
-    # for k in ('d', 'dd', 'ddd', 'sd', 'sdd', 'sddd'):
-    #     pymol_dict[k] = pymol_resi_list(k, total)
-    #     for frac, resi in pymol_dict[k].items():
-    #         print(k, frac, '+'.join(resi))
+    # PYMOL HELPER SEQUENCE
+    pymol_dict = {}
+    for k in ('d', 'dd', 'ddd', 'sd', 'sdd', 'sddd'):
+        pymol_dict[k] = pymol_resi_list(k, total)
+        for frac, resi in pymol_dict[k].items():
+            print(k, frac, '+'.join(resi))
