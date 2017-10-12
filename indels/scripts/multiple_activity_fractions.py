@@ -16,7 +16,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn import decomposition
 
-sys.path.insert(0, "/home/maya/Install/Acids")
 from indels.ind import classify_mutation, find_dna_mutations, get_total, classify_point_protein
 
 

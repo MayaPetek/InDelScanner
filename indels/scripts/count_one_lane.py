@@ -9,7 +9,6 @@ from Bio import SeqIO, AlignIO
 from Bio.Alphabet import IUPAC
 from Bio.Seq import MutableSeq
 
-sys.path.insert(0, "/home/maya/Install/Acids")
 from indels.ind import verifyRead, find_dna_mutations, get_counts
 from indels.output import print_coloured_diff
 
