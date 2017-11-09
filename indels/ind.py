@@ -17,6 +17,7 @@ import Bio.AlignIO
 import Bio.SeqIO
 import Bio.Data.CodonTable
 import Bio.Alphabet.IUPAC
+from Bio.SeqRecord import SeqRecord
 from Bio.Seq import MutableSeq, Seq
 
 
@@ -705,7 +706,7 @@ def mkdir_p(path):
         else: raise
 
 
-def trim_fastq_biopython(in_file, out_file, q_cutoff=10, consec=6, id=None):
+def trim_fastq_biopython(in_file, out_file, q_cutoff=10, consec=6, id=None, rc=False):
     """
     Trim a FASTQ file and write out the trimmed sequences as a FASTQ file.
 
@@ -740,10 +741,15 @@ def trim_fastq_biopython(in_file, out_file, q_cutoff=10, consec=6, id=None):
 
     # Write out trimmed sequence
     with open(out_file, 'w') as f:
-        Bio.SeqIO.write(seq[i:j], f, 'fastq')
+        if rc:
+            # if the sequence is from a reverse primer, reverse-complement first
+            rc = seq[i:j].reverse_complement(id=True, name=True, description=True)
+            Bio.SeqIO.write(rc, f, 'fastq')
+        else:
+            Bio.SeqIO.write(seq[i:j], f, 'fastq')
 
 
-def convert_ab1(ab1_dir):
+def convert_ab1(ab1_dir, rc=False):
     """
     Convert all *.ab1 files in input directory to trimmed fastq sequences.
     Write result to new fastq files in 'fastq' directory.
@@ -774,7 +780,7 @@ def convert_ab1(ab1_dir):
     for fname in listing:
         if 'trimmed' not in fname:
             prefix, suffix = os.path.splitext(fname)
-            trim_fastq_biopython(fname, prefix + '_trimmed.fastq')
+            trim_fastq_biopython(fname, prefix + '_trimmed.fastq', rc=True)
 
 
 def needle_align(fqname, argsref):
@@ -800,6 +806,7 @@ def needle_align(fqname, argsref):
     ref, read = trim_read(ref, read)
 
     return ref, read, id
+
 
 def trim_read(ref, read):
     """

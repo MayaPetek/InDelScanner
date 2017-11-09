@@ -45,4 +45,4 @@ if __name__ == "__main__":
         if protein == '':
             protein = "WT"
 
-        print(id, protein, ' '.join(errors), sep='\t')
+        print(id, protein, errors, sep='\t')

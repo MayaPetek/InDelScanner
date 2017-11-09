@@ -14,7 +14,11 @@ from Bio.Alphabet import IUPAC
 
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.colors as colors
+import pandas as pd
 from sklearn import decomposition
+from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans
 
 from indels.ind import classify_mutation, find_dna_mutations, get_total, classify_point_protein
 
@@ -35,21 +39,48 @@ def get_experimental_data(args, reference):
     if not args.experimental:
         return exp_data
 
-    with open(args.experimental, 'r') as f:
-        lit = csv.DictReader(f, dialect='excel')
-        ref = reference.seq.upper().tomutable()
-        r = str(ref)
-        start, end, activity, protein = lit.fieldnames
+    try:
+        with open(args.experimental + '.experimental.p', 'rb') as f:
+            exp_data = pickle.load(f)
+        print("Found experimental data")
 
-        for line in lit:
-            s = int(line.get(start))
-            e = int(line.get(end))
-            a = float(line.get(activity))
-            length = e - s
-            read = MutableSeq(r[:s] + ("-" * length) + r[e:], ref.alphabet)
-            errors = find_dna_mutations(read, ref, rejected, MAX_ERROR_INDEX=720)
-            exp_data[errors] = {'activity': a, 'protein': line.get(protein)}
-    print("Loaded experimental data")
+    except IOError:
+        print("Filtering experimental data")
+
+        with open(args.experimental, 'r') as f:
+            lit = csv.DictReader(f, dialect='excel')
+            ref = reference.seq.upper().tomutable()
+            r = str(ref)
+            start, end, activity, protein = lit.fieldnames
+
+            for line in lit:
+                s = int(line.get(start))
+                e = int(line.get(end))
+                a = float(line.get(activity))
+                length = e - s
+                read = MutableSeq(r[:s] + ("-" * length) + r[e:], ref.alphabet)
+                errors = find_dna_mutations(read, ref, rejected, MAX_ERROR_INDEX=720)
+                exp_data[errors] = {'activity': a, 'protein': line.get(protein)}
+
+        print(len(exp_data.keys()))
+
+        # Now add pre-processed errors in args.sanger
+        with open(args.sanger, 'r') as f:
+            # fields are error, activity, protein
+            f.readline()
+
+            for line in f:
+                error, activity, protein = line.split(sep='\t')
+                errors = tuple([part for part in error.split(',')])
+                a = float(activity)
+                exp_data[errors] = {'activity': a, 'protein': protein}
+
+        print(len(exp_data.keys()))
+        print("Loaded experimental data")
+
+        with open(args.experimental + '.experimental.p', 'wb') as f:
+            pickle.dump(exp_data, f)
+        print("Finished importing experimental data")
 
     return exp_data
 
@@ -288,7 +319,8 @@ def count_mutations_per_position(total):
 
     return position_counts
 
-def calculate_enrichment(e, total, position_counts=None, style='protein_mutations'):
+
+def calculate_enrichment(e, total, position_counts=None, style='dna_mutations'):
     """
     Helper function to calculate enrichments for all fractions relative to baseline
     :param e: which mutation
@@ -300,6 +332,7 @@ def calculate_enrichment(e, total, position_counts=None, style='protein_mutation
 
     if style == 'depth':
         N_freq = total[e]['counts']['N'] / total[e]['depth']['N']
+        # can't give enrichment if there is no sequencing data
         if N_freq == 0:
             return {}
         enrichments = {}
@@ -310,10 +343,13 @@ def calculate_enrichment(e, total, position_counts=None, style='protein_mutation
             enrichments[f] = frac_freq / N_freq
 
     else:
+
+        # calculate proportion of this mutation against other mutations at this position
         assert position_counts is not None
         if style == 'protein_mutations':
             level = 'protein'
-            if total[e]['protein_type'] == 'wt': # eliminate wt single condon substitutions
+            # eliminate wt single condon substitutions; don't know which codons to count against
+            if classify_mutation(e, style='protein') == 'wt':
                 return {}
         else:
             level = 'dna'
@@ -323,24 +359,42 @@ def calculate_enrichment(e, total, position_counts=None, style='protein_mutation
 
         dna_len = len(total[e]['dna_type'])  # number of codons affected
         prot_len = len(total[e]['protein_type'])
+        # start: which codons are we comparing against
         start = 0
-        if (level == 'protein') and (dna_len != prot_len): # the substitution is wt; for 'ss' assign to second codon
-            start = 1
+
+        # look out for synonymous substitutions
+        if (level == 'protein') and (dna_len != prot_len):
+            # if there is a deletion, the substitution is wt
+            if 'Δ' in total[e]['protein_mutation']:
+                start = 1
+            elif classify_mutation(e[:3], style='protein') == 'wt':  # first mutation in ss is wt
+                start = 1
+            else:   # second dna substituion is wt
+                prot_len -= 1
+
         fraction_frequency = {}
         for f in total[e]['counts'].keys():
             frac_count = total[e]['counts'][f]
             frac_total = 0
-            for i in range(start, prot_len):
-                frac_total += position_counts[level][f][int(float(e[3 * i]) / 3) + 1]
+
+
+            if level == 'protein':
+                for i in range(start, prot_len):
+                    frac_total += position_counts[level][f][int(float(e[3 * i]) / 3) + 1]
+            elif level == 'dna':
+                for i in range(start, dna_len):
+                    frac_total += position_counts[level][f][int(e[3 * i])]
+
             try:
                 fraction_frequency[f] = frac_count / frac_total
             except ZeroDivisionError:
+                # no mutations overall at this position
                 fraction_frequency[f] = 0
+
 
         # convert individual frequencies to enrichment - X compared to naive library
         enrichments = {}
-        if 'N' not in fraction_frequency.keys():
-            return {}
+
         if fraction_frequency['N'] == 0:
             return {}
 
@@ -352,64 +406,105 @@ def calculate_enrichment(e, total, position_counts=None, style='protein_mutation
     return enrichments
 
 
-def generate_training(experimental, total, position_counts):
+def generate_training(experimental, total, position_counts, style):
     """
     Prepare np arrays for all mutants for which activity is known.
     :param experimental:
     :param total:
     :return:
     """
-    no_points = len(experimental.keys())
-    # start with lists
-    X_training = []
-    y_training = []
 
-    classes = {'L': 0, 'MM': 1, 'H': 2}
-    order = ['H', 'MM', 'L']
+    # get everything into one Data Frame
+    seq_data = []
+    act_data = []
+    index = []
+    columns = ['H', 'MM', 'L']
 
-    # add H/L/MM enrichements to X and measured activity to y
+    n = 0
     for e in experimental.keys():
-        enrich = calculate_enrichment(e, total, position_counts)
-        if enrich == {}:
+        enrich = calculate_enrichment(e, total, position_counts, style)
+        # discard mutations for which there is no sequencing data
+        if total[e]['counts']['N'] < 10:
+            n += 1
             continue
-        entry = [enrich[fr] for fr in order]
-        X_training.append(entry)
+        seq = {c: enrich[c] for c in columns}
+        act = {'activity': experimental[e]['activity']}
 
-        a = experimental[e]['activity']
-        if a >= 0.5:
-            y_training.append(classes['H'])
-        elif a > 0:
-            y_training.append(classes['MM'])
-        elif a == 0:
-            y_training.append(classes['L'])
+        if act['activity'] >= 0.6:
+            act['fraction'] = 'H'
+        elif act['activity'] > 0:
+            act['fraction'] = 'MM'
+        elif act['activity'] == 0:
+            act['fraction'] = 'L'
 
-    X_training = np.array(X_training)
-    y_training = np.array(y_training)
+        seq_data.append(seq)
+        act_data.append(act)
+        index.append(e)
 
-    return X_training, y_training, order
+    exp_seq = pd.DataFrame(seq_data, index=index)
+    exp_act = pd.DataFrame(act_data, index=index)
+
+    act = {'H': 2, 'MM': 1, 'L': 0}
+    exp_act['fraction_num'] = exp_act.apply(lambda x: act[x['fraction']], axis=1)
+
+    print('No enrichement:', n)
+    return exp_seq, exp_act
 
 
-def pca_experimental(X_training, y_training, order, total):
+def pca_experimental(exp_seq, exp_act, graph=False):
+    """
+    PCA on sequencing enrichment.
+    :param exp_seq: data frame with sequencing enrichment indexed by error name
+    :param exp_act: data frame with activity data & classification indexed by error name
+    :return:
+    """
+    # keep original data safe
+    exp_std = exp_seq.copy()
+    # scale data to unit variance on each component
+    exp_std[exp_std.columns] = StandardScaler().fit_transform(exp_std[exp_std.columns])
+    pca = decomposition.PCA(3)
 
-    pca = decomposition.PCA(n_components=2)  # keep 2 components, they explain 96% of variance
-    pca.fit(X_training)  # learn the coordinates
-    X_pca = pca.transform(X_training)
+    exp_pca = pd.DataFrame(pca.fit_transform(exp_std), columns=['PCA%i' % i for i in range(1, 4)], index=exp_seq.index)
 
-    print(order)
-    print(pca.components_)
-    print()
-    print(pca.explained_variance_ratio_)
+    print('Explained variance by PCA', pca.explained_variance_ratio_)
+    print('Using {} experimentally measured mutations'.format(len(exp_pca)))
+
+    if graph:
+        # make plots
+        max_act = exp_act.activity.max()
+        exp_act['col'] = exp_act['activity'] / max_act
+        exp_act['col'] = exp_act['col'].astype(str)
+
+        fig, ax = plt.subplots()
+        cax = ax.scatter(exp_pca.PCA1, exp_pca.PCA2, c=exp_act.col, cmap='Greens', marker='o', s=20, edgecolors='grey',
+                   norm=colors.SymLogNorm(linthresh=0.1, linscale=1, vmin=0, vmax=max_act))
+        ax.set_title('Log fluorescence')
+        ax.set_xlabel('n PCA 1')
+        ax.set_ylabel('n PCA 2')
+
+        cbar = fig.colorbar(cax)
+        cbar.ax.set_yticklabels(['0'] + ['']*8 + ['{0:.1f}'.format(0.1*k) for k in range(1,11)])
+
+    return pca, exp_pca
+
+
+def pca_kmeans(exp_pca, nclusters=2):
+
+    kmeans = KMeans(n_clusters=nclusters, n_init=50).fit(exp_pca)
 
     plt.figure()
-    colors = ['green', 'turquoise', 'red']
-    for color, i, target_name in zip(colors, [2, 1, 0], order):
-        plt.scatter(X_pca[y_training == i, 0], X_pca[y_training == i, 1], color=color, label=target_name, marker=".")
-    plt.legend(loc='best', shadow=False, scatterpoints=1)
-    plt.title('Unscaled PCA of experimental data')
-    plt.xlabel('PCA 1')
-    plt.ylabel('PCA 2')
+    for i in range(77):
+        if kmeans.labels_[i] == 0:
+            plt.scatter(exp_pca.ix[i, 'PCA1'], exp_pca.ix[i, 'PCA2'], c='r', marker='o')
+        elif kmeans.labels_[i] == 1:
+            plt.scatter(exp_pca.ix[i, 'PCA1'], exp_pca.ix[i, 'PCA2'], c='g', marker='o')
+        elif kmeans.labels_[i] == 2:
+            plt.scatter(exp_pca.ix[i, 'PCA1'], exp_pca.ix[i, 'PCA2'], c='b', marker='o')
+    for i in range(0, nclusters):
+        plt.scatter(kmeans.cluster_centers_[i][0], kmeans.cluster_centers_[i][1], marker='+')
 
-    return X_pca, y_training, pca, order
+    return kmeans
+
 
 
 if __name__ == "__main__":
@@ -418,6 +513,7 @@ if __name__ == "__main__":
     parser.add_argument('-f', '--files', help='File listing counts to be combined')
     parser.add_argument('-e', '--experimental', help='Experimental data on mutations', required=False)
     parser.add_argument('-o', '--output', help='Name of output file', required=True)
+    parser.add_argument('-s', '--sanger', help='CSV file with sanger sequenced mutations', required=False)
     args = parser.parse_args()
 
     # Import counts for individual fractions, of which one is 'N', the naive (unsorted) library
@@ -427,25 +523,33 @@ if __name__ == "__main__":
 
     position_counts = count_mutations_per_position(total)
 
-    X_training, y_training, order = generate_training(experimental, total, position_counts)
-    X_exp, y_exp, pca, order = pca_experimental(X_training, y_training, order, total)
+    exp_seq, exp_act = generate_training(experimental, total, position_counts, 'dna_mutations')
+    pca, exp_pca = pca_experimental(exp_seq, exp_act, True)
 
-    # Crude predictions
-    total = predict_activity(total, style='protein_mutations', position_counts=position_counts)
-    find_epistatic_combinations(total, 2, args.output)
+    # k2 = pca_kmeans(exp_pca, nclusters=3)
 
-    # Save results
-    with open(args.output + '.total_with_predictions.p', 'wb') as f:
-        pickle.dump(total, f)
-
-    # VALIDATION: PLOT PREDICTIONS FOR EXPERIMENTALLY TESTED MUTATIONS
-    points = generate_experimental_points(experimental, total)
-    plot_known_mutations(points)
     plt.show()
 
-    # PYMOL HELPER SEQUENCE
-    pymol_dict = {}
-    for k in ('d', 'dd', 'ddd', 'sd', 'sdd', 'sddd'):
-        pymol_dict[k] = pymol_resi_list(k, total)
-        for frac, resi in pymol_dict[k].items():
-            print(k, frac, '+'.join(resi))
+    # X_training, y_training, order, df_exp = generate_training(experimental, total, position_counts)
+    # print(df[0:5])
+    # X_exp, y_exp, pca, order = pca_experimental(df, y_training, order, total)
+
+    # # Crude predictions
+    # total = predict_activity(total, style='protein_mutations', position_counts=position_counts)
+    # find_epistatic_combinations(total, 2, args.output)
+    #
+    # # Save results
+    # with open(args.output + '.total_with_predictions.p', 'wb') as f:
+    #     pickle.dump(total, f)
+
+    # # VALIDATION: PLOT PREDICTIONS FOR EXPERIMENTALLY TESTED MUTATIONS
+    # points = generate_experimental_points(experimental, total)
+    # plot_known_mutations(points)
+    # plt.show()
+    #
+    # # PYMOL HELPER SEQUENCE
+    # pymol_dict = {}
+    # for k in ('d', 'dd', 'ddd', 'sd', 'sdd', 'sddd'):
+    #     pymol_dict[k] = pymol_resi_list(k, total)
+    #     for frac, resi in pymol_dict[k].items():
+    #         print(k, frac, '+'.join(resi))
