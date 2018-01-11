@@ -38,7 +38,12 @@ if __name__ == "__main__":
     rejected = defaultdict(int)
 
     for fqname in listing:
-        ref, read, id = needle_align(fqname, args.reference)
+        try:
+            ref, read, id = needle_align(fqname, args.reference)
+        except:
+            print(fqname, 'is empty')
+            continue
+
         errors = find_dna_mutations(read, ref, rejected, 720)
 
         protein = mutation_to_protein_notation(errors)

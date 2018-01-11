@@ -384,7 +384,10 @@ def find_dna_mutations(read, ref, rejected, MAX_ERROR_INDEX=720):
     # Perform letter-stealing across the gap (if any). The resulting modified read will be ready for naive
     # triplet-wise comparison.
 
+    # quality control that there are no mutations at ends of reads
     ends = findEnds(read, ref)
+    if not endMatch(read, ref, ends):
+        return
     gap = findGap(read)
 
     errors = []
@@ -706,7 +709,7 @@ def mkdir_p(path):
         else: raise
 
 
-def trim_fastq_biopython(in_file, out_file, q_cutoff=10, consec=6, id=None, rc=False):
+def trim_fastq_biopython(in_file, out_file, q_cutoff=30, consec=6, id=None, rc=False):
     """
     Trim a FASTQ file and write out the trimmed sequences as a FASTQ file.
 

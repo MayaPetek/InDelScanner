@@ -55,7 +55,7 @@ def printErrors(errors, read, ref, colouredDiff):
 def print_coloured_diff(errors, read, ref, id, ctr, PRINT_COLOURED_DIFF):
     print("\n\n#############################################################################")
     print("Read: %i " % ctr)
-    print("Read ID: %i \n" % id)
+    # print("Read ID: %i \n" % id)
     printErrors(errors, read, ref, PRINT_COLOURED_DIFF)
 
 def printSummary(dictionary, keys):
