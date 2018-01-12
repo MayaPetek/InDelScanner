@@ -2,28 +2,33 @@
 
 import sys
 import pickle
+import re
 import argparse
 from collections import defaultdict
 
 from Bio import SeqIO, AlignIO
 from Bio.Alphabet import IUPAC
-from Bio.Seq import MutableSeq
+from Bio.Seq import MutableSeq, translate
 
-from indels.ind import trim_read, findEnds, endMatch, find_dna_mutations
+from indels.ind import trim_read, findEnds, endMatch, findGap, gapAlign
 from indels.output import print_coloured_diff
 
+
+def indel_len(sequence, start):
+    l = 0
+    while sequence[start + l] == '-':
+        l += 1
+    return l
 
 def find_DNA_diff(read, ref):
     """
     @ read, ref: MutableSeq objects
     :return errors - tuple (position, expected triplet, actual triplet, ) / none if broken read
 
-    We've got to find and report several types of difference: insertion, deletion, and substitution.
-    We'll begin by running through the strings until we find the first 3-letter block that contains a "-"
-    in either string, or which has letters in both strings, but they differ.
-    After that, we will regard any "-" in read as being part of a deletion error, any "-" in ref as
-    being part of an insertion error, until we reach the point where all remaining symbols in read are
-    # "-" (at which point we are finished).
+    Letter by letter report mutations in NGS read, all counts 1- based in result (code in 0-count).
+    - substitution: 78C = nt 78 in reference is changed to C
+    - deletions: 78d6 = 6 nt deleted after 78: 1-78, d6, 85-end
+    - insertion: 78iATC = after nt 78 inserted seq. ATC
     """
 
     if read is None:
@@ -39,9 +44,9 @@ def find_DNA_diff(read, ref):
     # scan read & reference letter by letter, counting position in reference
     # reads have been trimmed so that reference starts @ 0
     dna_errors = []
-
     ref_index = ends.get('start')
     i = ends.get('start')
+
     while i < ends.get('end'):
         # check for differences
         if read[i] == ref[i]:
@@ -50,12 +55,10 @@ def find_DNA_diff(read, ref):
 
         elif read[i] == '-':
             # start of a deletion
-            l = 0
-            while read[i+l] == '-':
-                l += 1
+            l = indel_len(read, i)
             # now we know the length of a deletion, check for frameshifts
             if l % 3 == 0:
-                dna_errors += [str(ref_index) + 'd' + str(l)] # deletion length l starting at ref_index in 0-count
+                dna_errors += [str(ref_index) + 'd' + str(l)]  # deletion length l starting at ref_index in 0-count
                 i += l
                 ref_index += l
             else:
@@ -64,12 +67,11 @@ def find_DNA_diff(read, ref):
 
         elif ref[i] == '-':
             # start of an insertion
-            l = 0
-            while ref[i+l] == '-':
-                l += 1
+            l = indel_len(ref, i)
             # check for frameshifts
             if l % 3 == 0:
                 dna_errors += [str(ref_index) + 'i' + str(read[i:i+l])]
+                print(dna_errors)
                 i += l
             else:
                 dna_errors += [str(ref_index) + 'f']
@@ -77,15 +79,82 @@ def find_DNA_diff(read, ref):
 
         else:
             # substitution
-            dna_errors += [str(ref_index) + str(read[i])]
+            dna_errors += [str(ref_index + 1) + str(read[i])]
             i += 1
             ref_index += 1
 
     return tuple(dna_errors)
 
-def find_protein_diff():
 
-    return
+def find_protein_diff(read, ref):
+
+    # quality control
+    if read is None:
+        return
+    ends = findEnds(read, ref)
+    if not endMatch(read, ref, ends):
+        return
+
+    # scan reference triplet by triplet
+    # move letters when encountering an indel
+    prot_errors = []
+    i = ends.get('aligned')
+    ref_index = int(ends.get('aligned') / 3) # reference amino acid index
+
+    while i <= ends.get('end'):
+        if read is None:
+            break
+        ref_codon = ref[i:i+3]
+        read_codon = read[i:i+3]
+
+        if '-' in read_codon:  # found a deletion
+            # Check if this is the last acid, and it's incomplete, ignore it.
+            if re.search('[ATGC]', str(read[i + 3:])) is None:
+                break
+
+            if read_codon == '---':  # single codon deletion
+                prot_errors += [str(ref_index) + 'd']
+                i += 3
+                ref_index += 1
+
+            else:  # check it's not a frame shift
+                gap = findGap(read[i - 1:])
+                l = gap[1] - gap[0]
+                if l % 3 != 0:
+                    prot_errors.append(str(ref_index) + 'f')
+                    break
+                # realign gap and repeat loop at same position to compare the codons
+                gap = (gap[0] + i - 1, gap[1] + i - 1)
+                read = gapAlign(read, gap)
+                continue
+
+        elif '-' in ref_codon:  # found an insertion
+            gap = findGap(ref[i-1:])
+            l = gap[1] - gap[0]
+            if l % 3 != 0:
+                prot_errors.append(str(ref_index) + 'f')
+                break
+            if gap[0] == 1:  # insertion after codon
+                insertion = read[gap[0] + i - 1:gap[1] + i -1]
+                prot_errors.append(str(ref_index) + 'i' + str(translate(insertion)) )
+                i += l
+                ref_index += 1
+            else:  # realign gap and repeat loop at same position to compare the codons
+                gap = (gap[0] + i - 1, gap[1] + i - 1)
+                ref = gapAlign(ref, gap)
+                continue
+
+        elif translate(read_codon) != translate(ref_codon):  # must be a substitution
+            prot_errors.append(str(ref_index) + str(translate(read_codon)) )
+            i += 3
+            ref_index += 1
+
+        else:
+            i += 3
+            ref_index += 1
+
+    return tuple(prot_errors)
+
 
 def countOneAlignment(args):
     """
@@ -128,7 +197,8 @@ def countOneAlignment(args):
         ref, read = trim_read(ref, read)
 
         dna_errors = find_DNA_diff(read, ref) # errors = a tuple
-        print(dna_errors)
+        prot_errors = find_protein_diff(read, ref)
+        print(dna_errors, prot_errors)
         one_lane_counts[dna_errors] += 1
 
     return one_lane_counts
@@ -155,10 +225,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     one_lane_counts = countOneAlignment(args)
-
-    #  Libraries contain up to range from 1 to 4 mutations per gene
-    #  shortest = single deletion, longest = 1 substitution + 3 deletions
-    # so total of 4 errors
 
     # How many nucleotides need to match at the end of a read for a valid alignment:
     # - matching 2 should correct alignment errors, 3 avoids problems with InDel
