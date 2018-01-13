@@ -14,9 +14,7 @@ def printErrors(errors, read, ref, colouredDiff):
     @param ref The reference, post-alignment, a Seq object..
     @param colouredDiff If true, will print a fancy coloured diff instead of a concise error summary.
     """
-    #for e in errors:
-    #    print("%s %s > %s " % (e['position'], e['expected'], e['actual']), end='');
-    
+
     errors = list(errors)
     errors = ' '.join(errors)
     print(errors)
@@ -52,10 +50,8 @@ def printErrors(errors, read, ref, colouredDiff):
                 
         print()
 
-def print_coloured_diff(errors, read, ref, id, ctr, PRINT_COLOURED_DIFF):
+def print_coloured_diff(errors, read, ref, PRINT_COLOURED_DIFF):
     print("\n\n#############################################################################")
-    print("Read: %i " % ctr)
-    # print("Read ID: %i \n" % id)
     printErrors(errors, read, ref, PRINT_COLOURED_DIFF)
 
 def printSummary(dictionary, keys):

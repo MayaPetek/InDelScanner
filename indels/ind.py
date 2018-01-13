@@ -269,6 +269,9 @@ def endMatch(read, ref, ends, MATCH_N_END=3):
     Aligner errors arise when mutations are at the ends of the read rather than in the middle.
     Trimming ends only shifts the problem. Instead require that read ends match the reference.
     Return False if either end doesn't match
+    How many nucleotides need to match at the end of a read for a valid alignment:
+    - matching 2 should correct alignment errors, 3 avoids problems with InDel repositioning
+    - 3 simplifies the first codon: it's either complete or it's OK to move 1 or 2 bases over to the next triplet
     """
     startRead = read[ends.get("start"):ends.get("start") + MATCH_N_END]
     startRef = ref[ends.get("start"):ends.get("start") + MATCH_N_END]
@@ -317,23 +320,24 @@ def gapAlign(read, gap):
         return read
 
     movingGap = (gap[0], gap[1])
+    newread = read
 
     # Shift letters from the end to the start...
     while movingGap[0] % 3 != 0:
-        assert (read[movingGap[0]] == "-")
+        assert (newread[movingGap[0]] == "-")
 
         # This means we ran out of symbols to steal before we managed to align.
         # This indicates a gap at the end, and one we can't fix. Reject!
         if read[movingGap[1]] == "-":
             return None
 
-        read[movingGap[0]] = read[movingGap[1]]
-        read[movingGap[1]] = "-"
+        newread[movingGap[0]] = newread[movingGap[1]]
+        newread[movingGap[1]] = "-"
 
         # Shift the gap to the right...
         movingGap = (movingGap[0] + 1, movingGap[1] + 1)
 
-    return read
+    return newread
 
 
 def verifyRead(read, ref, rejected, MATCH_N_END=3):
