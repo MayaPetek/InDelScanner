@@ -713,7 +713,7 @@ def mkdir_p(path):
         else: raise
 
 
-def trim_fastq_biopython(in_file, out_file, q_cutoff=30, consec=6, id=None, rc=False):
+def trim_fastq_biopython(in_file, out_file, q_cutoff=50, consec=6, id=None, rc=False):
     """
     Trim a FASTQ file and write out the trimmed sequences as a FASTQ file.
 
@@ -754,6 +754,18 @@ def trim_fastq_biopython(in_file, out_file, q_cutoff=30, consec=6, id=None, rc=F
             Bio.SeqIO.write(rc, f, 'fastq')
         else:
             Bio.SeqIO.write(seq[i:j], f, 'fastq')
+
+
+def ab1_to_fastq(fname, rc=False, q_cutoff=50):
+
+    # Get the prefix of the file
+    prefix, suffix = os.path.splitext(fname)
+
+    # Convert and trim FASTQ file
+    Bio.SeqIO.convert(fname, 'abi', prefix + '.fastq', 'fastq')
+    trim_fastq_biopython(prefix + '.fastq', prefix + '_trimmed.fastq', rc=rc, q_cutoff=q_cutoff)
+
+    return prefix + '_trimmed.fastq'
 
 
 def convert_ab1(ab1_dir, rc=False):

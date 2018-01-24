@@ -4,6 +4,7 @@ import sys
 import pickle
 import re
 import os
+import csv
 import argparse
 
 import pandas as pd
@@ -14,9 +15,14 @@ from Bio import AlignIO
 from Bio.Alphabet import IUPAC
 from Bio.Seq import MutableSeq, translate
 
-from indels.ind import trim_read, findEnds, endMatch, findGap, gapAlign
+from indels.ind import trim_read, findEnds, endMatch, findGap, gapAlign, ab1_to_fastq, needle_align
 from indels.output import print_coloured_diff
 
+# Demand Python 3.
+if sys.version_info[0] < 3:
+    print("Python 3 is required, but you are using Python %i.%i.%i") % (
+        sys.version_info[0], sys.version_info[1], sys.version_info[2])
+    sys.exit(1)
 
 def indel_len(sequence, start):
     l = 0
@@ -37,6 +43,7 @@ def find_DNA_diff(read, ref):
     """
 
     if read is None:
+        print('no read provided')
         return
 
     # No gap realignment at this point
@@ -44,6 +51,7 @@ def find_DNA_diff(read, ref):
     # quality control that there are no mutations at ends of reads
     ends = findEnds(read, ref)
     if not endMatch(read, ref, ends):
+        print('ends do not match')
         return
 
     # scan read & reference letter by letter, counting position in reference
@@ -106,7 +114,7 @@ def find_protein_diff(read, ref):
     # move letters when encountering an indel
     prot_errors = []
     i = ends.get('aligned')
-    ref_index = int(ends.get('aligned') / 3)  # reference amino acid index
+    ref_index = int(ends.get('aligned') / 3) + 1 # reference amino acid index
 
     while i <= ends.get('end'):
         if newread is None:
@@ -201,7 +209,7 @@ def countOneAlignment(alignment, debug):
         except:
             if not dna_errors:
                 print(dna_errors)
-            print_coloured_diff(readname, read, ref, verbose)
+            print_coloured_diff(readname, read, ref, debug)
             raise
 
         one_lane_counts[prot_errors]['total'] += 1
@@ -253,9 +261,92 @@ def combine_totals_same_reference(counts):
         for prot_errors in one_lane_counts.keys():
             one_reference_counts[prot_errors][fraction] = one_lane_counts[prot_errors]['total']
 
-    df_protein = pd.DataFrame.from_dict(one_reference_counts, orient='index')
+    # df_protein = pd.DataFrame.from_dict(one_reference_counts, orient='index')
 
-    return df_protein
+    return one_reference_counts
+
+
+def find_shared_entries(counts1, counts2, cutoff=20):
+    """
+    Find mutations observed in both backgrounds
+    :param counts1: {mutation: {H: 13, N: 0, M: 88}}
+    :param counts2:
+    :return:
+    """
+    c1 = {}
+    c2 = {}
+    for entry, counts in counts1.items():
+        if max(counts.values()) > cutoff:
+            try:
+                if max(counts2[entry].values()) > cutoff:
+                    c2[entry] = counts2[entry]
+                    c1[entry] = counts1[entry]
+            except ValueError:
+                continue
+    return c1, c2
+
+
+def process_sanger_plate(summary, experimental, rc=False, q_cutoff=40, verbose=False):
+
+    with open(summary) as f:
+        reader = csv.DictReader(f, fieldnames=('ab1', 'activity', 'use', 'protein'))
+        next(reader)
+        for row in reader:
+            if row['use'] == 'no':
+                continue
+            # read ab1, convert to trimmed fastq
+            fqname = ab1_to_fastq(row['ab1'], rc=rc, q_cutoff=q_cutoff)
+            try:
+                ref, read, id = needle_align(fqname, args.reference)
+                dna_errors = find_DNA_diff(read, ref)  # errors = a tuple
+                protein_errors = find_protein_diff(read, ref)
+                if verbose:
+                    print(row['ab1'], dna_errors, protein_errors, row['protein'])
+                if dna_errors:
+                    experimental[protein_errors][dna_errors] = float(row['activity'])
+            except ValueError:
+                prefix, suffix = os.path.splitext(fqname)
+                outname = prefix + '.aln'
+                if os.stat(outname).st_size == 0:
+                    print(outname, 'is empty.')
+                    continue
+
+
+def import_sanger(sanger_folder):
+    """
+    Expect all sequencing files to be in a folder
+    :param sanger_folder:
+    :return:
+    """
+
+    # set up experimental dictionary in same format as one lane counts
+    # experimental[protein_mutation][dna_mutation] = activity
+    experimental = defaultdict(partial(defaultdict, int))
+
+
+    # add all folders - one folder is one sequencing plate
+    cwd = os.getcwd()
+
+    for d in os.listdir(sanger_folder):
+        plate = cwd + os.sep + sanger_folder + os.sep + d
+        print(plate)
+        summary = ''
+        for file in os.listdir(plate):
+            if file.endswith(d + '.csv'):
+                summary = d + '.csv'
+                break
+        os.chdir(plate)
+        if summary == '':
+            print('Cannot find activity CSV in {0} folder.'.format(plate))
+        else:
+            process_sanger_plate(summary, experimental, rc=True)
+
+    # convert to data frame
+
+    os.chdir(cwd)
+    return experimental
+
+
 
 if __name__ == "__main__":
     """
@@ -264,24 +355,41 @@ if __name__ == "__main__":
          reference comes before read sequence. (>Ref, seq, >Read, seq).
     (2.) Optional: DEBUG print a coloured representation of mismatches
     """
-    # Demand Python 3.
-    if sys.version_info[0] < 3:
-        print("Python 3 is required, but you are using Python %i.%i.%i") % (
-            sys.version_info[0], sys.version_info[1], sys.version_info[2])
-        sys.exit(1)
-
-    parser = argparse.ArgumentParser(
-        description='Finds all in-frame mutations in a gene')
+    parser = argparse.ArgumentParser(description='Finds all in-frame mutations in a gene')
     parser.add_argument('-f', '--folder', help='Folder containing multiple sequence alignments', required=True)
+    parser.add_argument('-r', '--reference', required=False)
     parser.add_argument('-d', '--debug', help='Turn on debugging', required=False, action="store_true")  # Visual
     args = parser.parse_args()
 
-    all_references = count_multiple_fractions(args.folder, args.debug)
-    with open('everything.p', 'wb') as f:
-        pickle.dump(all_references, f)
+    """
+    PROCESS SANGER SEQUENCING DATA
+    """
 
-    total = {}
-    for i in all_references.keys():
-        total[i] = combine_totals_same_reference(all_references[i])
+    experimental = import_sanger(os.path.join(args.folder, 'sanger'))
 
-    print(total.keys())
+    """
+    PROCESS NGS DATA
+    """
+
+    # all_references = count_multiple_fractions(args.folder, args.debug)
+    # with open('everything.p', 'wb') as f:
+    #     pickle.dump(all_references, f)
+
+    with open('everything.p', 'rb') as f:
+        all_references = pickle.load(f)
+
+    eGFP = combine_totals_same_reference(all_references['eGFP'])
+    GFP8 = combine_totals_same_reference(all_references['GFP8'])
+
+    for e in experimental.keys():
+        print('Error: {} \t Activity: {} \n eGFP:{} \n GFP8:{} \n'.format(e, experimental[e], eGFP[e], GFP8[e]))
+
+    # eGFP_shared, GFP8_shared = find_shared_entries(eGFP, GFP8)
+    #
+    # df_eGFP = pd.DataFrame.from_dict(eGFP_shared, orient='index')
+    # df_GFP8 = pd.DataFrame.from_dict(GFP8_shared, orient='index')
+
+
+
+    # # both = pd.merge(df_eGFP, df_GFP8, how='inner', sort=False)
+
