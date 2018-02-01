@@ -8,6 +8,12 @@ import csv
 import argparse
 
 import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.colors as colors
+from sklearn import decomposition
+from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans
+
 from collections import defaultdict
 from functools import partial
 
@@ -31,7 +37,7 @@ def indel_len(sequence, start):
     return l
 
 
-def find_DNA_diff(read, ref):
+def find_DNA_diff(read, ref, verbose):
     """
     @ read, ref: MutableSeq objects
     :return errors - tuple (position, expected triplet, actual triplet, ) / none if broken read
@@ -43,7 +49,8 @@ def find_DNA_diff(read, ref):
     """
 
     if read is None:
-        print('no read provided')
+        if verbose:
+            print('no read provided')
         return
 
     # No gap realignment at this point
@@ -51,7 +58,8 @@ def find_DNA_diff(read, ref):
     # quality control that there are no mutations at ends of reads
     ends = findEnds(read, ref)
     if not endMatch(read, ref, ends):
-        print('ends do not match')
+        if verbose:
+            print('ends do not match')
         return
 
     # scan read & reference letter by letter, counting position in reference
@@ -71,11 +79,11 @@ def find_DNA_diff(read, ref):
             l = indel_len(read, i)
             # now we know the length of a deletion, check for frameshifts
             if l % 3 == 0:
-                dna_errors += [str(ref_index) + 'd' + str(l)]  # deletion length l starting at ref_index in 0-count
+                dna_errors += [(str(ref_index), 'd', str(l))]  # deletion length l starting at ref_index in 0-count
                 i += l
                 ref_index += l
             else:
-                dna_errors += [str(ref_index) + 'f']
+                dna_errors += [(str(ref_index), 'f')]
                 break
 
         elif ref[i] == '-':
@@ -83,22 +91,22 @@ def find_DNA_diff(read, ref):
             l = indel_len(ref, i)
             # check for frameshifts
             if l % 3 == 0:
-                dna_errors += [str(ref_index) + 'i' + str(read[i:i+l])]
+                dna_errors += [(str(ref_index), 'i', str(read[i:i+l]) )]
                 i += l
             else:
-                dna_errors += [str(ref_index) + 'f']
+                dna_errors += [(str(ref_index), 'f')]
                 break
 
         else:
             # substitution
-            dna_errors += [str(ref_index + 1) + str(read[i])]
+            dna_errors += [(str(ref_index + 1), 's', str(read[i]) )]
             i += 1
             ref_index += 1
 
     return tuple(dna_errors)
 
 
-def find_protein_diff(read, ref):
+def find_protein_diff(read, ref, verbose):
 
     # quality control
     if read is None:
@@ -114,7 +122,7 @@ def find_protein_diff(read, ref):
     # move letters when encountering an indel
     prot_errors = []
     i = ends.get('aligned')
-    ref_index = int(ends.get('aligned') / 3) + 1 # reference amino acid index
+    ref_index = int(ends.get('aligned') / 3) + 1  # reference amino acid index
 
     while i <= ends.get('end'):
         if newread is None:
@@ -128,17 +136,17 @@ def find_protein_diff(read, ref):
                 break
 
             if '-' in ref_codon:  # something very broken
-                prot_errors.append(str(ref_index) + 'f')
+                prot_errors.append((ref_index,'f'))
                 return tuple(prot_errors)
             if read_codon == '---':  # single codon deletion
-                prot_errors += [str(ref_index) + 'd']
+                prot_errors += [(ref_index, 'd')]
                 i += 3
                 ref_index += 1
 
             else:  # check it's not a frame shift
                 l = indel_len(newread, i)
                 if l % 3 != 0:
-                    prot_errors.append(str(ref_index) + 'f')
+                    prot_errors.append((ref_index, 'f'))
                     return tuple(prot_errors)
                 # realign gap and repeat loop at same position to compare the codons
                 gap = findGap(newread[i - 1:])
@@ -149,15 +157,15 @@ def find_protein_diff(read, ref):
         elif '-' in ref_codon:  # found an insertion
             l = indel_len(newref, i)
             if l % 3 != 0:
-                prot_errors.append(str(ref_index) + 'f')
+                prot_errors.append((ref_index, 'f'))
                 return tuple(prot_errors)
             gap = findGap(newref[i-1:])
             if gap[0] == 1:  # insertion after codon
                 insertion = newread[gap[0] + i - 1:gap[1] + i - 1]
                 if '-' in insertion:
-                    prot_errors.append(str(ref_index) + 'f')
+                    prot_errors.append((ref_index, 'f'))
                     return tuple(prot_errors)
-                prot_errors.append(str(ref_index) + 'i' + str(translate(insertion)))
+                prot_errors.append((ref_index, 'i', str(translate(insertion)) ))
                 i += l
                 ref_index += 1
             else:  # realign gap and repeat loop at same position to compare the codons
@@ -166,7 +174,7 @@ def find_protein_diff(read, ref):
                 continue
 
         elif translate(read_codon) != translate(ref_codon):  # must be a substitution
-            prot_errors.append(str(ref_index) + str(translate(read_codon)))
+            prot_errors.append((ref_index, 's', str(translate(read_codon))))
             i += 3
             ref_index += 1
 
@@ -174,10 +182,66 @@ def find_protein_diff(read, ref):
             i += 3
             ref_index += 1
 
+    if verbose:
+        print(prot_errors)
+
     return tuple(prot_errors)
 
 
-def countOneAlignment(alignment, debug):
+def depth_by_nt_position(depth_1, depth_2):
+    """
+    Collect samtools depth output into a list. 2nd column = 1-based position, 3rd column = coverage.
+    Samtools gives two separate files for assembled and unassembled reads
+    :param depth_1: output of samtools depth, tab delimited
+    :param depth_2: same for other set of reads
+    :return: a list of ints with coverage per position
+    """
+
+    nt_depth = []
+    # depth of assembled and unassembled reads is in two separate files
+    with open(depth_1, 'r') as f:
+        for line in f.readlines():
+            l = line.split()
+            # depth in third column, 'samtools depth' output
+            nt_depth.append(int(l[2]))
+    # open second file and add the count to same position in depth list
+    with open(depth_2, 'r') as f:
+        for line in f.readlines():
+            l = line.split()
+            i = int(l[1]) - 1
+            nt_depth[i] += int(l[2])
+    return nt_depth
+
+
+def depth_by_aa_position(nt_depth):
+    """
+    Convert nucleotide depth into average depth at amino acid position
+    :param nt_depth:
+    :return:
+    """
+    i = 0
+    aa_depth = {}
+    while i < len(nt_depth):
+        pos = 1 + (i / 3)
+        d = sum(nt_depth[i:i+3]) / 3
+        aa_depth[pos] = d
+        i += 3
+    return aa_depth
+
+
+def aa_depth_for_mutation(prot_error, aa_depth):
+
+    if prot_error:
+        e_depth = [aa_depth[point[0]] for point in prot_error]
+    else:
+        return
+
+    avg_depth = sum(e_depth) / len(e_depth)
+
+    return avg_depth
+
+
+def countOneAlignment(alignment, aa_depth, debug):
     """
     Don't bother with expected/allowed mutations, just find everything and filter later
     Final format: {DNA error: [(protein error), fraction,
@@ -189,7 +253,9 @@ def countOneAlignment(alignment, debug):
         - add to count table
     4. Print counts
     """
-    one_lane_counts = defaultdict(partial(defaultdict, int))
+    # use a regular dictionary
+    # when a protein mutation is first encountered, create an entry including depth
+    one_lane_counts = {}
 
     # reading & looping over read/reference sequence in multiple sequence alignment
     # use AlignIO parser and keep sequence only, allowing it to change (important for gap shifts) 
@@ -204,20 +270,29 @@ def countOneAlignment(alignment, debug):
         ref, read = trim_read(ref, read)
 
         try:
-            dna_errors = find_DNA_diff(read, ref)  # errors = a tuple
-            prot_errors = find_protein_diff(read, ref)
+            dna_errors = find_DNA_diff(read, ref, debug)  # errors = a tuple
+            prot_errors = find_protein_diff(read, ref, debug)
         except:
             if not dna_errors:
                 print(dna_errors)
             print_coloured_diff(readname, read, ref, debug)
             raise
 
-        one_lane_counts[prot_errors]['total'] += 1
-        one_lane_counts[prot_errors][dna_errors] += 1
+        try:
+            one_lane_counts[prot_errors]['total'] += 1
+            one_lane_counts[prot_errors]['dna'][dna_errors] += 1
+        except KeyError:
+            one_lane_counts[prot_errors] = {'dna': defaultdict(int),
+                                            'depth': aa_depth_for_mutation(prot_errors, aa_depth),
+                                            'total': 1}
+            one_lane_counts[prot_errors]['dna'][dna_errors] += 1
 
+
+    # once we're done counting, add sequencing coverage and count the mutations
     n = 0
     threshold = 10
     for error in one_lane_counts.keys():
+
         if one_lane_counts[error]['total'] > threshold:
             n += 1
 
@@ -229,7 +304,8 @@ def countOneAlignment(alignment, debug):
 
 def count_multiple_fractions(folder, debug):
     """
-    Process all reference.fraction.aln files in given  folder
+    Process all reference.fraction.aln files in given  folder in combination with
+    reference.fraction.assembled.depth.txt and reference.fraction.unassembled.depth.txt
     :param folder:
     :return:
     """
@@ -240,9 +316,14 @@ def count_multiple_fractions(folder, debug):
             ref, fraction, suffix = aln.rsplit(".", 2)
             print('Counting alignment {0} in background {1} and activity fraction {2}'
                   .format(aln, ref, fraction))
+            # prepare sequencing coverage / depth
+            assembled = ref + '.' + fraction + '.assembled.depth.txt'
+            unassembled = ref + '.' + fraction + '.unassembled.depth.txt'
+            aa_depth = depth_by_aa_position(depth_by_nt_position(assembled, unassembled))
+
             if ref not in all_references.keys():
                 all_references[ref] = {}
-            all_references[ref][fraction] = countOneAlignment(aln, debug)
+            all_references[ref][fraction] = countOneAlignment(aln, aa_depth, debug)
 
     return all_references
 
@@ -303,13 +384,19 @@ def process_sanger_plate(summary, experimental, rc=False, q_cutoff=40, verbose=F
                 if verbose:
                     print(row['ab1'], dna_errors, protein_errors, row['protein'])
                 if dna_errors:
-                    experimental[protein_errors][dna_errors] = float(row['activity'])
+                    try:
+                        experimental[protein_errors]['dna'][dna_errors] = float(row['activity'])
+                    except KeyError:
+                        experimental[protein_errors] = {'dna': {}}
+                        experimental[protein_errors]['dna'][dna_errors] = float(row['activity'])
             except ValueError:
                 prefix, suffix = os.path.splitext(fqname)
                 outname = prefix + '.aln'
                 if os.stat(outname).st_size == 0:
                     print(outname, 'is empty.')
                     continue
+
+    return experimental
 
 
 def import_sanger(sanger_folder):
@@ -321,7 +408,7 @@ def import_sanger(sanger_folder):
 
     # set up experimental dictionary in same format as one lane counts
     # experimental[protein_mutation][dna_mutation] = activity
-    experimental = defaultdict(partial(defaultdict, int))
+    experimental = {}
 
 
     # add all folders - one folder is one sequencing plate
@@ -341,12 +428,73 @@ def import_sanger(sanger_folder):
         else:
             process_sanger_plate(summary, experimental, rc=True)
 
-    # convert to data frame
+    # average synonymous mutations
+    for p in experimental.keys():
+        experimental[p]['average'] = sum(experimental[p]['dna'].values()) / len(experimental[p]['dna'])
+
+
+    """
+    index = error name, from how experimental is keyed experimental[protein mutation]   
+    """
+    df_exp = pd.DataFrame.from_dict(experimental, orient='index')
 
     os.chdir(cwd)
     return experimental
 
 
+def pca_experimental(exp_seq, exp_act, graph=False):
+    """
+    PCA on sequencing enrichment.
+    :param exp_seq: data frame with sequencing enrichment indexed by error name
+    :param exp_act: data frame with activity data & classification indexed by error name
+    :return:
+    """
+    # keep original data safe
+    exp_std = exp_seq.copy()
+    # scale data to unit variance on each component
+    exp_std[exp_std.columns] = StandardScaler().fit_transform(exp_std[exp_std.columns])
+    pca = decomposition.PCA(3)
+
+    exp_pca = pd.DataFrame(pca.fit_transform(exp_std), columns=['PCA%i' % i for i in range(1, 4)], index=exp_seq.index)
+
+    print('Explained variance by PCA', pca.explained_variance_ratio_)
+    print('Using {} experimentally measured mutations'.format(len(exp_pca)))
+
+    if graph:
+        # make plots
+        max_act = exp_act.activity.max()
+        exp_act['col'] = exp_act['activity'] / max_act
+        exp_act['col'] = exp_act['col'].astype(str)
+
+        fig, ax = plt.subplots()
+        cax = ax.scatter(exp_pca.PCA1, exp_pca.PCA2, c=exp_act.col, cmap='Greens', marker='o', s=20, edgecolors='grey',
+                   norm=colors.SymLogNorm(linthresh=0.1, linscale=1, vmin=0, vmax=max_act))
+        ax.set_title('Log fluorescence')
+        ax.set_xlabel('n PCA 1')
+        ax.set_ylabel('n PCA 2')
+
+        cbar = fig.colorbar(cax)
+        cbar.ax.set_yticklabels(['0'] + ['']*8 + ['{0:.1f}'.format(0.1*k) for k in range(1,11)])
+
+    return pca, exp_pca
+
+
+def pca_kmeans(exp_pca, nclusters=2):
+
+    kmeans = KMeans(n_clusters=nclusters, n_init=50).fit(exp_pca)
+
+    plt.figure()
+    for i in range(77):
+        if kmeans.labels_[i] == 0:
+            plt.scatter(exp_pca.ix[i, 'PCA1'], exp_pca.ix[i, 'PCA2'], c='r', marker='o')
+        elif kmeans.labels_[i] == 1:
+            plt.scatter(exp_pca.ix[i, 'PCA1'], exp_pca.ix[i, 'PCA2'], c='g', marker='o')
+        elif kmeans.labels_[i] == 2:
+            plt.scatter(exp_pca.ix[i, 'PCA1'], exp_pca.ix[i, 'PCA2'], c='b', marker='o')
+    for i in range(0, nclusters):
+        plt.scatter(kmeans.cluster_centers_[i][0], kmeans.cluster_centers_[i][1], marker='+')
+
+    return kmeans
 
 if __name__ == "__main__":
     """
@@ -361,35 +509,35 @@ if __name__ == "__main__":
     parser.add_argument('-d', '--debug', help='Turn on debugging', required=False, action="store_true")  # Visual
     args = parser.parse_args()
 
-    """
-    PROCESS SANGER SEQUENCING DATA
-    """
-
-    experimental = import_sanger(os.path.join(args.folder, 'sanger'))
+    # """
+    # PROCESS SANGER SEQUENCING DATA
+    # """
+    #
+    # exp = import_sanger(os.path.join(args.folder, 'sanger'))
 
     """
     PROCESS NGS DATA
     """
 
-    # all_references = count_multiple_fractions(args.folder, args.debug)
+    all_references = count_multiple_fractions(args.folder, args.debug)
     # with open('everything.p', 'wb') as f:
     #     pickle.dump(all_references, f)
 
-    with open('everything.p', 'rb') as f:
-        all_references = pickle.load(f)
-
-    eGFP = combine_totals_same_reference(all_references['eGFP'])
-    GFP8 = combine_totals_same_reference(all_references['GFP8'])
-
-    for e in experimental.keys():
-        print('Error: {} \t Activity: {} \n eGFP:{} \n GFP8:{} \n'.format(e, experimental[e], eGFP[e], GFP8[e]))
-
-    # eGFP_shared, GFP8_shared = find_shared_entries(eGFP, GFP8)
+    # with open('everything.p', 'rb') as f:
+    #     all_references = pickle.load(f)
     #
-    # df_eGFP = pd.DataFrame.from_dict(eGFP_shared, orient='index')
-    # df_GFP8 = pd.DataFrame.from_dict(GFP8_shared, orient='index')
-
-
-
-    # # both = pd.merge(df_eGFP, df_GFP8, how='inner', sort=False)
-
+    # eGFP = combine_totals_same_reference(all_references['eGFP'])
+    # GFP8 = combine_totals_same_reference(all_references['GFP8'])
+    #
+    # for e in experimental.keys():
+    #     print('Error: {} \t Activity: {} \n eGFP:{} \n GFP8:{} \n'.format(e, experimental[e], eGFP[e], GFP8[e]))
+    #
+    # # eGFP_shared, GFP8_shared = find_shared_entries(eGFP, GFP8)
+    # #
+    # # df_eGFP = pd.DataFrame.from_dict(eGFP_shared, orient='index')
+    # # df_GFP8 = pd.DataFrame.from_dict(GFP8_shared, orient='index')
+    #
+    #
+    #
+    # # # both = pd.merge(df_eGFP, df_GFP8, how='inner', sort=False)
+    #
