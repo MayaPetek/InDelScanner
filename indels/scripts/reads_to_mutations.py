@@ -241,7 +241,7 @@ def aa_depth_for_mutation(prot_error, aa_depth):
     return avg_depth
 
 
-def countOneAlignment(alignment, aa_depth, debug):
+def count_one_fraction(alignment, aa_depth, debug):
     """
     Don't bother with expected/allowed mutations, just find everything and filter later
     Final format: {DNA error: [(protein error), fraction,
@@ -287,12 +287,10 @@ def countOneAlignment(alignment, aa_depth, debug):
                                             'total': 1}
             one_lane_counts[prot_errors]['dna'][dna_errors] += 1
 
-
-    # once we're done counting, add sequencing coverage and count the mutations
+    # count the mutations
     n = 0
     threshold = 10
     for error in one_lane_counts.keys():
-
         if one_lane_counts[error]['total'] > threshold:
             n += 1
 
@@ -302,30 +300,67 @@ def countOneAlignment(alignment, aa_depth, debug):
     return one_lane_counts
 
 
-def count_multiple_fractions(folder, debug):
+def count_multiple_fractions(folder, baseline, debug):
     """
     Process all reference.fraction.aln files in given  folder in combination with
     reference.fraction.assembled.depth.txt and reference.fraction.unassembled.depth.txt
-    :param folder:
+    :param folder: contains all *.aln and depth files
+    :param baseline: string containing name of baseline
     :return:
     """
     all_references = {}
 
-    for aln in os.listdir(folder):
-        if aln.endswith('.aln'):
-            ref, fraction, suffix = aln.rsplit(".", 2)
+    print(os.listdir(folder))
+    for f in os.listdir(folder):
+        if f.endswith('.aln'):
+            aln_path = os.path.join(folder, f)
+            ref, fraction, suffix = f.rsplit(".", 2)
             print('Counting alignment {0} in background {1} and activity fraction {2}'
-                  .format(aln, ref, fraction))
+                  .format(f, ref, fraction))
             # prepare sequencing coverage / depth
-            assembled = ref + '.' + fraction + '.assembled.depth.txt'
-            unassembled = ref + '.' + fraction + '.unassembled.depth.txt'
+            assembled = os.path.join(folder, ref + '.' + fraction + '.assembled.depth.txt')
+            unassembled = os.path.join(folder, ref + '.' + fraction + '.unassembled.depth.txt')
             aa_depth = depth_by_aa_position(depth_by_nt_position(assembled, unassembled))
 
             if ref not in all_references.keys():
                 all_references[ref] = {}
-            all_references[ref][fraction] = countOneAlignment(aln, aa_depth, debug)
+
+            if fraction == baseline:
+                fraction = 'baseline'
+            all_references[ref][fraction] = count_one_fraction(aln_path, aa_depth, debug)
 
     return all_references
+
+
+def calculate_enrichements(all_references):
+
+    enrichements = {}
+    for ref in all_references.keys():
+        if 'baseline' not in all_references[ref].keys():
+            return all_references
+        enrichements[ref] = {}
+        for fraction in all_references[ref].keys():
+            if fraction == 'baseline':
+                continue
+            enrichements[ref][fraction] = {}
+            for e in all_references[ref][fraction].keys():
+                try:
+                    baseline_count = all_references[ref]['baseline'][e]['total']
+                    baseline_depth = all_references[ref]['baseline'][e]['depth']
+                    error_count = all_references[ref][fraction][e]['total']
+                    error_depth = all_references[ref][fraction][e]['depth']
+                except KeyError:
+                    continue
+
+                try:
+                    baseline_freq = baseline_count / baseline_depth
+                    error_freq = error_count / error_depth
+                    # all_references[ref][fraction][e]['enriched'] = error_freq / baseline_freq
+                    enrichements[ref][fraction][e] = error_freq / baseline_freq
+                except TypeError:
+                    enrichements[ref][fraction][e] = 0
+
+    return enrichements
 
 
 def combine_totals_same_reference(counts):
@@ -379,8 +414,8 @@ def process_sanger_plate(summary, experimental, rc=False, q_cutoff=40, verbose=F
             fqname = ab1_to_fastq(row['ab1'], rc=rc, q_cutoff=q_cutoff)
             try:
                 ref, read, id = needle_align(fqname, args.reference)
-                dna_errors = find_DNA_diff(read, ref)  # errors = a tuple
-                protein_errors = find_protein_diff(read, ref)
+                dna_errors = find_DNA_diff(read, ref, verbose)  # errors = a tuple
+                protein_errors = find_protein_diff(read, ref, verbose)
                 if verbose:
                     print(row['ab1'], dna_errors, protein_errors, row['protein'])
                 if dna_errors:
@@ -399,7 +434,7 @@ def process_sanger_plate(summary, experimental, rc=False, q_cutoff=40, verbose=F
     return experimental
 
 
-def import_sanger(sanger_folder):
+def import_sanger(sanger_folder, verbose=False):
     """
     Expect all sequencing files to be in a folder
     :param sanger_folder:
@@ -408,6 +443,7 @@ def import_sanger(sanger_folder):
 
     # set up experimental dictionary in same format as one lane counts
     # experimental[protein_mutation][dna_mutation] = activity
+    # experimental[protei_mutation]['average'] = activity
     experimental = {}
 
 
@@ -426,20 +462,61 @@ def import_sanger(sanger_folder):
         if summary == '':
             print('Cannot find activity CSV in {0} folder.'.format(plate))
         else:
-            process_sanger_plate(summary, experimental, rc=True)
+            process_sanger_plate(summary, experimental, verbose=verbose, rc=True)
 
     # average synonymous mutations
     for p in experimental.keys():
         experimental[p]['average'] = sum(experimental[p]['dna'].values()) / len(experimental[p]['dna'])
 
-
-    """
-    index = error name, from how experimental is keyed experimental[protein mutation]   
-    """
-    df_exp = pd.DataFrame.from_dict(experimental, orient='index')
-
     os.chdir(cwd)
     return experimental
+
+
+def prepare_exp_for_pca(experimental, all_references, position_counts, style):
+    """
+    Prepare np arrays for all mutants for which activity is known.
+    :param experimental:
+    :param total:
+    :return:
+    """
+
+    # get everything into one Data Frame
+    seq_data = []  # enrichements in NGS
+    act_data = []  # experimentally measured activity, a number
+    index = []  # protein mutations
+    columns = ['H', 'MM', 'L']
+
+    n = 0  # counter for mutations with poor NGS data
+    # experimental[protein_mutation]['average'] = activity
+
+    for e in experimental.keys():
+        enrich = enrichements['eGFP'][e]
+        # discard mutations for which there is no sequencing data
+        if all_references['eGFP']['baseline'][e]['total'] < 10:
+            n += 1
+            continue
+        seq = {c: enrich[c] for c in columns}
+        act = {'activity': experimental[e]['average']}
+
+        if act['activity'] >= 0.6:
+            act['fraction'] = 'H'
+        elif act['activity'] > 0:
+            act['fraction'] = 'MM'
+        elif act['activity'] == 0:
+            act['fraction'] = 'L'
+
+        seq_data.append(seq)
+        act_data.append(act)
+        index.append(e)
+
+    exp_seq = pd.DataFrame(seq_data, index=index)
+    exp_act = pd.DataFrame(act_data, index=index)
+
+    act = {'H': 2, 'MM': 1, 'L': 0}
+    exp_act['fraction_num'] = exp_act.apply(lambda x: act[x['fraction']], axis=1)
+
+    print('No enrichement:', n)
+    return exp_seq, exp_act
 
 
 def pca_experimental(exp_seq, exp_act, graph=False):
@@ -507,24 +584,29 @@ if __name__ == "__main__":
     parser.add_argument('-f', '--folder', help='Folder containing multiple sequence alignments', required=True)
     parser.add_argument('-r', '--reference', required=False)
     parser.add_argument('-d', '--debug', help='Turn on debugging', required=False, action="store_true")  # Visual
+    parser.add_argument('-b', '--baseline', help='Name of baseline fraction', required=False)
     args = parser.parse_args()
 
-    # """
-    # PROCESS SANGER SEQUENCING DATA
-    # """
-    #
-    # exp = import_sanger(os.path.join(args.folder, 'sanger'))
 
     """
     PROCESS NGS DATA
     """
 
-    all_references = count_multiple_fractions(args.folder, args.debug)
+    # all_references = count_multiple_fractions(args.folder, args.baseline, args.debug)
+    #
     # with open('everything.p', 'wb') as f:
     #     pickle.dump(all_references, f)
 
-    # with open('everything.p', 'rb') as f:
-    #     all_references = pickle.load(f)
+    with open('everything.p', 'rb') as f:
+        all_references = pickle.load(f)
+
+    enrichements = calculate_enrichements(all_references)
+
+    # """
+    # PROCESS SANGER SEQUENCING DATA
+    # """
+    # exp = import_sanger(os.path.join(args.folder, 'sanger'), verbose=True)
+
     #
     # eGFP = combine_totals_same_reference(all_references['eGFP'])
     # GFP8 = combine_totals_same_reference(all_references['GFP8'])
