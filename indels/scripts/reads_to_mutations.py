@@ -6,8 +6,10 @@ import re
 import os
 import csv
 import argparse
+import random
 
 import pandas as pd
+import networkx as nx
 import matplotlib.pyplot as plt
 import matplotlib.colors as colors
 from sklearn import decomposition
@@ -175,6 +177,8 @@ def find_protein_diff(read, ref, verbose):
 
         elif translate(read_codon) != translate(ref_codon):  # must be a substitution
             prot_errors.append((ref_index, 's', str(translate(read_codon))))
+            if str(translate(read_codon)) == '*':
+                return tuple(prot_errors)
             i += 3
             ref_index += 1
 
@@ -332,7 +336,7 @@ def count_multiple_fractions(folder, baseline, debug):
     return all_references
 
 
-def calculate_enrichements(all_references):
+def calculate_enrichments(all_references):
 
     enrichements = {}
     for ref in all_references.keys():
@@ -363,43 +367,100 @@ def calculate_enrichements(all_references):
     return enrichements
 
 
-def combine_totals_same_reference(counts):
+def are_mutations_similar(mutation1, mutation2):
     """
-    Start with a dictionary
-    {prot_errors: {'H': 17, 'N': 12, ...}
-    :param counts: dict containing {fraction: one_lane_counts} pairings
+    Similar if they share at least one type & position of mutation, eg. 88d.
+    :param mutation1:
+    :param mutation2:
+    :return:
+    """
+    positions1 = set(p[0:2] for p in mutation1)
+    positions2 = set(p[0:2] for p in mutation2)
+
+    if positions1 == positions2:
+        return False
+
+    shared = positions1 & positions2
+
+    if len(shared) != 0:
+        return True
+    else:
+        return False
+
+
+def pretty_mutation(prot_error):
+    flat = []
+    for point in prot_error:
+        s = ''.join(str(e) for e in point)
+        flat.append(s)
+    return ' '.join(flat)
+
+def make_similarity_network(mutations):
+    """
+    Build a graph connecting mutations that
+    :param mutations: iterable listing mutations in the network
     :return:
     """
 
-    one_reference_counts = defaultdict(partial(defaultdict, int))
+    network = nx.Graph()
+    for mut1 in mutations:
+        if mut1 is None:
+            continue
+        for mut2 in mutations:
+            if mut2 is None:
+                continue
+            if are_mutations_similar(mut1, mut2):
+                network.add_edge(pretty_mutation(mut1), pretty_mutation(mut2))
 
-    for fraction, one_lane_counts in counts.items():
-        for prot_errors in one_lane_counts.keys():
-            one_reference_counts[prot_errors][fraction] = one_lane_counts[prot_errors]['total']
+    return network
 
-    # df_protein = pd.DataFrame.from_dict(one_reference_counts, orient='index')
 
-    return one_reference_counts
+def combine_same_reference(dictionary, style='enrich'):
+    """
+    Start with a dictionary in the form reference[fraction][prot_errors]('total)=number and turn it into
+    reference[prot_errors] = {'H': 0.8, 'L': 12, ...}
+    :param dictionary: dict containing {fraction: number} pairings
+    :return:
+    """
+    assert style in ['enrich', 'counts']
+
+    combined = {ref: {} for ref in dictionary.keys()}
+
+    # invert the order
+
+    for ref in dictionary.keys():
+        for fraction in dictionary[ref].keys():
+            for prot_errors in dictionary[ref][fraction].keys():
+                if style == 'enrich':
+                    value = dictionary[ref][fraction][prot_errors]
+                elif style == 'counts':
+                    value = dictionary[ref][fraction][prot_errors]['total']
+                try:
+                    combined[ref][prot_errors][fraction] = value
+                except KeyError:
+                    combined[ref][prot_errors] = {fraction: value}
+
+    return combined
 
 
 def find_shared_entries(counts1, counts2, cutoff=20):
     """
     Find mutations observed in both backgrounds
     :param counts1: {mutation: {H: 13, N: 0, M: 88}}
-    :param counts2:
-    :return:
+    :param counts2: {mutation: {H: 13, N: 0, M: 88}}
+    :return: list of mutations with good counts in both
     """
-    c1 = {}
-    c2 = {}
-    for entry, counts in counts1.items():
+    shared = []
+
+    for prot_mutation, counts in counts1.items():
         if max(counts.values()) > cutoff:
             try:
-                if max(counts2[entry].values()) > cutoff:
-                    c2[entry] = counts2[entry]
-                    c1[entry] = counts1[entry]
-            except ValueError:
+                if max(counts2[prot_mutation].values()) > cutoff:
+                    shared.append(prot_mutation)
+            except KeyError:
                 continue
-    return c1, c2
+
+    return shared
 
 
 def process_sanger_plate(summary, experimental, rc=False, q_cutoff=40, verbose=False):
@@ -587,34 +648,43 @@ if __name__ == "__main__":
     parser.add_argument('-b', '--baseline', help='Name of baseline fraction', required=False)
     args = parser.parse_args()
 
-
-    """
-    PROCESS NGS DATA
-    """
-
-    # all_references = count_multiple_fractions(args.folder, args.baseline, args.debug)
-    #
-    # with open('everything.p', 'wb') as f:
-    #     pickle.dump(all_references, f)
-
-    with open('everything.p', 'rb') as f:
-        all_references = pickle.load(f)
-
-    enrichements = calculate_enrichements(all_references)
-
     # """
     # PROCESS SANGER SEQUENCING DATA
     # """
     # exp = import_sanger(os.path.join(args.folder, 'sanger'), verbose=True)
 
-    #
-    # eGFP = combine_totals_same_reference(all_references['eGFP'])
-    # GFP8 = combine_totals_same_reference(all_references['GFP8'])
+    """
+    PROCESS NGS DATA
+    1. Count all mutations
+    2. Calculate enrichments
+    3. Find list of good quality mutations
+    4. Call activity scores
+    5. Make sequence similarity network
+    """
+
+    all_references = count_multiple_fractions(args.folder, args.baseline, args.debug)
+
+    with open('everything.p', 'wb') as f:
+        pickle.dump(all_references, f)
+
+    # with open('everything.p', 'rb') as f:
+    #     all_references = pickle.load(f)
+
+    combined_enrich = combine_same_reference(calculate_enrichments(all_references))
+    combined_counts = combine_same_reference(all_references, style='counts')
+
+    shared = find_shared_entries(combined_counts['eGFP'], combined_counts['GFP8'])
+
+    net = make_similarity_network(shared)
+
+
+
+
     #
     # for e in experimental.keys():
     #     print('Error: {} \t Activity: {} \n eGFP:{} \n GFP8:{} \n'.format(e, experimental[e], eGFP[e], GFP8[e]))
     #
-    # # eGFP_shared, GFP8_shared = find_shared_entries(eGFP, GFP8)
+    # #
     # #
     # # df_eGFP = pd.DataFrame.from_dict(eGFP_shared, orient='index')
     # # df_GFP8 = pd.DataFrame.from_dict(GFP8_shared, orient='index')
