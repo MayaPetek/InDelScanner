@@ -7,6 +7,7 @@ import os
 import csv
 import argparse
 import random
+import time
 
 import pandas as pd
 import networkx as nx
@@ -19,7 +20,7 @@ from sklearn.cluster import KMeans
 from collections import defaultdict
 from functools import partial
 
-from Bio import AlignIO
+from Bio import AlignIO, SeqIO
 from Bio.Alphabet import IUPAC
 from Bio.Seq import MutableSeq, translate
 
@@ -380,9 +381,12 @@ def are_mutations_similar(mutation1, mutation2):
     if positions1 == positions2:
         return False
 
+    max_length = max([len(positions1), len(positions2)])
+    cutoff = max(1, max_length - 1)
+
     shared = positions1 & positions2
 
-    if len(shared) != 0:
+    if len(shared) >= cutoff:
         return True
     else:
         return False
@@ -395,18 +399,78 @@ def pretty_mutation(prot_error):
         flat.append(s)
     return ' '.join(flat)
 
-def make_similarity_network(mutations):
+
+def generate_positions(ref):
+    """
+    Make a list of (int, s) for all positions in reference fasta
+    :param ref: name of fasta file
+    :return: list of tuples
+    """
+    reference = SeqIO.read(ref, "fasta")
+    positions = [((i, 's'), (i, 'd')) for i in range(1, len(reference) + 1)]
+    return positions
+
+
+def max_activity_fraction(enrich):
+    """
+    Find the activity fraction with highest enrichment in a dict of format {H: 0.1, M: 17, L:0}
+    :param enrich:
+    :return:
+    """
+    inverted = {value: frac for frac, value in enrich.items()}
+    max_enrichment = max(inverted.keys())
+    max_fraction = inverted[max_enrichment]
+    return max_fraction
+
+def generate_mutations_for_network(shared, combined_counts={}, combined_enrich={}):
+
+    mutations = {e: {'type': 'NGS'} for e in shared if e}
+
+    for e in shared:
+        if e is None:
+            continue
+
+        for ref in combined_enrich.keys():
+            try:
+                mutations[e]['.'.join([str(ref), 'max_enrich'])] = max_activity_fraction(combined_enrich[ref][e])
+            except KeyError:
+                continue
+            for frac in combined_counts[ref][e].keys():
+                mutations[e]['.'.join([str(ref), str(frac), 'NGS_count'])] = combined_counts[ref][e][frac]
+
+    return mutations
+
+
+def make_similarity_network(mutations, ref):
     """
     Build a graph connecting mutations that
-    :param mutations: iterable listing mutations in the network
-    :return:
+    :param mutations: dictionary with mutation tuples as keys and a dictionary of attributes as values
+    :return: network
     """
 
     network = nx.Graph()
-    for mut1 in mutations:
+
+    # generate the protein backbone using generic 1s, 2s, 3s... mutations and connect them
+    positions = generate_positions(ref)
+    for e in positions:
+        network.add_node(pretty_mutation(e), type='backbone')
+    for i in range(1, len(positions)):
+        network.add_edge(pretty_mutation(positions[i-1]), pretty_mutation(positions[i]))
+
+    # add in all mutations, their attributes and connect them to backbone
+    for name, att in mutations.items():
+        if name is None:
+            continue
+        network.add_node(pretty_mutation(name), **att)
+        for e in positions:
+            if are_mutations_similar(e, name):
+                network.add_edge(pretty_mutation(e), pretty_mutation(name))
+
+    # now add all other connections
+    for mut1 in mutations.keys():
         if mut1 is None:
             continue
-        for mut2 in mutations:
+        for mut2 in mutations.keys():
             if mut2 is None:
                 continue
             if are_mutations_similar(mut1, mut2):
@@ -443,7 +507,7 @@ def combine_same_reference(dictionary, style='enrich'):
     return combined
 
 
-def find_shared_entries(counts1, counts2, cutoff=20):
+def find_shared_entries(counts1, counts2, cutoff=10):
     """
     Find mutations observed in both backgrounds
     :param counts1: {mutation: {H: 13, N: 0, M: 88}}
@@ -662,23 +726,21 @@ if __name__ == "__main__":
     5. Make sequence similarity network
     """
 
-    all_references = count_multiple_fractions(args.folder, args.baseline, args.debug)
+    # all_references = count_multiple_fractions(args.folder, args.baseline, args.debug)
+    #
+    # with open('everything.p', 'wb') as f:
+    #     pickle.dump(all_references, f)
 
-    with open('everything.p', 'wb') as f:
-        pickle.dump(all_references, f)
-
-    # with open('everything.p', 'rb') as f:
-    #     all_references = pickle.load(f)
+    with open('everything.p', 'rb') as f:
+        all_references = pickle.load(f)
 
     combined_enrich = combine_same_reference(calculate_enrichments(all_references))
     combined_counts = combine_same_reference(all_references, style='counts')
 
     shared = find_shared_entries(combined_counts['eGFP'], combined_counts['GFP8'])
-
-    net = make_similarity_network(shared)
-
-
-
+    mutations = generate_mutations_for_network(shared, combined_counts, combined_enrich)
+    net = make_similarity_network(mutations, args.reference)
+    nx.write_graphml(net, 'GFP_v5.graphml')
 
     #
     # for e in experimental.keys():
