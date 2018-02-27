@@ -6,6 +6,7 @@ import re
 import os
 import csv
 import argparse
+import pprint
 import random
 import time
 
@@ -32,6 +33,8 @@ if sys.version_info[0] < 3:
     print("Python 3 is required, but you are using Python %i.%i.%i") % (
         sys.version_info[0], sys.version_info[1], sys.version_info[2])
     sys.exit(1)
+
+# Identifying mutations from fasta alignment
 
 def indel_len(sequence, start):
     l = 0
@@ -193,6 +196,8 @@ def find_protein_diff(read, ref, verbose):
     return tuple(prot_errors)
 
 
+# Add sequencing depth and convert to enrichments
+
 def depth_by_nt_position(depth_1, depth_2):
     """
     Collect samtools depth output into a list. 2nd column = 1-based position, 3rd column = coverage.
@@ -245,6 +250,8 @@ def aa_depth_for_mutation(prot_error, aa_depth):
 
     return avg_depth
 
+
+# Combine data from different activity fractions
 
 def count_one_fraction(alignment, aa_depth, debug):
     """
@@ -368,6 +375,86 @@ def calculate_enrichments(all_references):
     return enrichements
 
 
+def combine_same_reference(dictionary, style='enrich'):
+    """
+    Start with a dictionary in the form reference[fraction][prot_errors]('total)=number and turn it into
+    reference[prot_errors] = {'H': 0.8, 'L': 12, ...}
+    :param dictionary: dict containing {fraction: number} pairings
+    :return:
+    """
+    assert style in ['enrich', 'counts']
+
+    combined = {ref: {} for ref in dictionary.keys()}
+
+    # invert the order
+
+    for ref in dictionary.keys():
+        for fraction in dictionary[ref].keys():
+            for prot_errors in dictionary[ref][fraction].keys():
+                if style == 'enrich':
+                    value = dictionary[ref][fraction][prot_errors]
+                elif style == 'counts':
+                    value = dictionary[ref][fraction][prot_errors]['total']
+                try:
+                    combined[ref][prot_errors][fraction] = value
+                except KeyError:
+                    combined[ref][prot_errors] = {fraction: value}
+
+    return combined
+
+
+def find_transposon_histogram(all_references, background):
+    """
+    Find all pure trinucleotide deletions and count where they are
+    :return: dict
+    """
+    hist = defaultdict(int)
+
+    for prot_mutation in all_references[background]['baseline']:
+        if prot_mutation is None:
+            continue
+        elif len(prot_mutation) <= 2:
+            for dna_mutation, count in all_references[background]['baseline'][prot_mutation]['dna'].items():
+                if len(dna_mutation) == 1 and dna_mutation[0][1:] == ('d', '3'):
+                    hist[int(dna_mutation[0][0])] += count
+
+    return hist
+
+
+def max_activity_fraction(enrich):
+    """
+    Find the activity fraction with highest enrichment in a dict of format {H: 0.1, M: 17, L:0}
+    :param enrich:
+    :return:
+    """
+    inverted = {value: frac for frac, value in enrich.items()}
+    max_enrichment = max(inverted.keys())
+    max_fraction = inverted[max_enrichment]
+    return max_fraction
+
+
+def find_shared_entries(counts1, counts2, cutoff=10):
+    """
+    Find mutations observed in both backgrounds
+    :param counts1: {mutation: {H: 13, N: 0, M: 88}}
+    :param counts2: {mutation: {H: 13, N: 0, M: 88}}
+    :return: list of mutations with good counts in both
+    """
+    shared = []
+
+    for prot_mutation, counts in counts1.items():
+        if max(counts.values()) > cutoff:
+            try:
+                if max(counts2[prot_mutation].values()) > cutoff:
+                    shared.append(prot_mutation)
+            except KeyError:
+                continue
+
+    return shared
+
+
+# Collect all counts and enrichments into a sequence similarity network
+
 def are_mutations_similar(mutation1, mutation2):
     """
     Similar if they share at least one type & position of mutation, eg. 88d.
@@ -411,17 +498,6 @@ def generate_positions(ref):
     return positions
 
 
-def max_activity_fraction(enrich):
-    """
-    Find the activity fraction with highest enrichment in a dict of format {H: 0.1, M: 17, L:0}
-    :param enrich:
-    :return:
-    """
-    inverted = {value: frac for frac, value in enrich.items()}
-    max_enrichment = max(inverted.keys())
-    max_fraction = inverted[max_enrichment]
-    return max_fraction
-
 def generate_mutations_for_network(shared, combined_counts={}, combined_enrich={}):
 
     mutations = {e: {'type': 'NGS'} for e in shared if e}
@@ -453,9 +529,11 @@ def make_similarity_network(mutations, ref):
     # generate the protein backbone using generic 1s, 2s, 3s... mutations and connect them
     positions = generate_positions(ref)
     for e in positions:
-        network.add_node(pretty_mutation(e), type='backbone')
+        network.add_node(pretty_mutation(e), type='backbone', position=e[0][0])
     for i in range(1, len(positions)):
-        network.add_edge(pretty_mutation(positions[i-1]), pretty_mutation(positions[i]))
+        network.add_edge(pretty_mutation(positions[i-1]), pretty_mutation(positions[i]), type='backbone')
+
+    backbone = network.copy()
 
     # add in all mutations, their attributes and connect them to backbone
     for name, att in mutations.items():
@@ -464,7 +542,7 @@ def make_similarity_network(mutations, ref):
         network.add_node(pretty_mutation(name), **att)
         for e in positions:
             if are_mutations_similar(e, name):
-                network.add_edge(pretty_mutation(e), pretty_mutation(name))
+                network.add_edge(pretty_mutation(e), pretty_mutation(name), type='NGS_to_backbone')
 
     # now add all other connections
     for mut1 in mutations.keys():
@@ -474,58 +552,12 @@ def make_similarity_network(mutations, ref):
             if mut2 is None:
                 continue
             if are_mutations_similar(mut1, mut2):
-                network.add_edge(pretty_mutation(mut1), pretty_mutation(mut2))
+                network.add_edge(pretty_mutation(mut1), pretty_mutation(mut2), type='NGS_to_NGS')
 
-    return network
-
-
-def combine_same_reference(dictionary, style='enrich'):
-    """
-    Start with a dictionary in the form reference[fraction][prot_errors]('total)=number and turn it into
-    reference[prot_errors] = {'H': 0.8, 'L': 12, ...}
-    :param dictionary: dict containing {fraction: number} pairings
-    :return:
-    """
-    assert style in ['enrich', 'counts']
-
-    combined = {ref: {} for ref in dictionary.keys()}
-
-    # invert the order
-
-    for ref in dictionary.keys():
-        for fraction in dictionary[ref].keys():
-            for prot_errors in dictionary[ref][fraction].keys():
-                if style == 'enrich':
-                    value = dictionary[ref][fraction][prot_errors]
-                elif style == 'counts':
-                    value = dictionary[ref][fraction][prot_errors]['total']
-                try:
-                    combined[ref][prot_errors][fraction] = value
-                except KeyError:
-                    combined[ref][prot_errors] = {fraction: value}
-
-    return combined
+    return backbone, network
 
 
-def find_shared_entries(counts1, counts2, cutoff=10):
-    """
-    Find mutations observed in both backgrounds
-    :param counts1: {mutation: {H: 13, N: 0, M: 88}}
-    :param counts2: {mutation: {H: 13, N: 0, M: 88}}
-    :return: list of mutations with good counts in both
-    """
-    shared = []
-
-    for prot_mutation, counts in counts1.items():
-        if max(counts.values()) > cutoff:
-            try:
-                if max(counts2[prot_mutation].values()) > cutoff:
-                    shared.append(prot_mutation)
-            except KeyError:
-                continue
-
-    return shared
-
+# Add activity values for Sanger sequenced clones - currently broken
 
 def process_sanger_plate(summary, experimental, rc=False, q_cutoff=40, verbose=False):
 
@@ -737,10 +769,14 @@ if __name__ == "__main__":
     combined_enrich = combine_same_reference(calculate_enrichments(all_references))
     combined_counts = combine_same_reference(all_references, style='counts')
 
-    shared = find_shared_entries(combined_counts['eGFP'], combined_counts['GFP8'])
-    mutations = generate_mutations_for_network(shared, combined_counts, combined_enrich)
-    net = make_similarity_network(mutations, args.reference)
-    nx.write_graphml(net, 'GFP_v5.graphml')
+    hist = find_transposon_histogram(all_references, 'eGFP')
+
+
+    # shared = find_shared_entries(combined_counts['eGFP'], combined_counts['GFP8'])
+    # mutations = generate_mutations_for_network(shared, combined_counts, combined_enrich)
+    # backbone, net = make_similarity_network(mutations, args.reference)
+    # # nx.write_graphml(backbone, 'GFP_v7_backbone.graphml')
+    # nx.write_graphml(net, 'GFP_v8.graphml')
 
     #
     # for e in experimental.keys():
