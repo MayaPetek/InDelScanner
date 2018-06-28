@@ -19,7 +19,6 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
 
 from collections import defaultdict
-from functools import partial
 
 from Bio import AlignIO, SeqIO
 from Bio.Alphabet import IUPAC
@@ -48,6 +47,8 @@ def find_DNA_diff(read, ref, verbose):
     @ read, ref: MutableSeq objects
     :return errors - tuple (position, expected triplet, actual triplet, ) / none if broken read
 
+    The assumption is that the reference includes 3 nt either side of the gene of interest. The starting triplet is
+    reported as 'amino acid 0'.
     Letter by letter report mutations in NGS read, all counts 1- based in result (code in 0-count).
     - substitution: 78C = nt 78 in reference is changed to C
     - deletions: 78d6 = 6 nt deleted after 78: 1-78, d6, 85-end
@@ -69,9 +70,9 @@ def find_DNA_diff(read, ref, verbose):
         return
 
     # scan read & reference letter by letter, counting position in reference
-    # reads have been trimmed so that reference starts @ 0
+    # reads have been trimmed so that reference starts @ 3 (0,1,2 is the extra triplet)
     dna_errors = []
-    ref_index = ends.get('start')
+    ref_index = ends.get('start') - 3
     i = ends.get('start')
 
     while i < ends.get('end'):
@@ -128,7 +129,7 @@ def find_protein_diff(read, ref, verbose):
     # move letters when encountering an indel
     prot_errors = []
     i = ends.get('aligned')
-    ref_index = int(ends.get('aligned') / 3) + 1  # reference amino acid index
+    ref_index = int(ends.get('aligned') / 3)   # reference amino acid index
 
     while i <= ends.get('end'):
         if newread is None:
@@ -332,6 +333,8 @@ def count_multiple_fractions(folder, baseline, debug):
             # prepare sequencing coverage / depth
             assembled = os.path.join(folder, ref + '.' + fraction + '.assembled.depth.txt')
             unassembled = os.path.join(folder, ref + '.' + fraction + '.unassembled.depth.txt')
+            # assembled = os.path.join(folder, ref + '.assembled.depth.txt')
+            # unassembled = os.path.join(folder, ref + '.unassembled.depth.txt')
             aa_depth = depth_by_aa_position(depth_by_nt_position(assembled, unassembled))
 
             if ref not in all_references.keys():
@@ -342,6 +345,175 @@ def count_multiple_fractions(folder, baseline, debug):
             all_references[ref][fraction] = count_one_fraction(aln_path, aa_depth, debug)
 
     return all_references
+
+
+def classify_dna(dna_error):
+    if dna_error is None:  # empty or broken reads
+        return 'b'
+    elif len(dna_error) > 1:
+        # expect substitutions
+        if dna_error[-1][1] == 'f':  # frameshifts are always the last mutation
+            return 'f'
+        else:
+            for k in range(len(dna_error)):
+                if dna_error[k][1] == 'i':
+                    return 'si'
+                elif dna_error[k][1] == 'd':
+                    return 'sd'
+            return 's'
+    elif len(dna_error) == 1:
+        if dna_error[0][1] == 'f':
+            return 'f'
+        elif dna_error[0][1] == 'd':
+            return 'd' + dna_error[0][2]  # length of deletion
+        elif dna_error[0][1] == 'i':
+            return 'i' + str(len(dna_error[0][2]))
+        elif dna_error[0][1] == 's':
+            return 's'
+    else:
+        return 'b'
+
+
+def get_dna_composition(all_references, cutoff=10):
+    dna_count = {}
+    dna_reads = {}
+    for background in all_references.keys():
+        for fraction in all_references[background].keys():
+            print('Analysing background {0} and fraction {1}. Unusal mutations: '.format(background, fraction))
+            distinct_mutations = 0
+            total_count = 0
+            dna_count[background + fraction] = {'s': 0, 'd3': 0, 'd6': 0, 'd9': 0, 'i3': 0, 'i6': 0, 'i9': 0, 'f': 0,
+                                                'b': 0, 'other': 0, 'sd': 0, 'si': 0}
+            dna_reads[background + fraction] = {'s': 0, 'd3': 0, 'd6': 0, 'd9': 0, 'i3': 0, 'i6': 0, 'i9': 0, 'f': 0,
+                                                'b': 0, 'other': 0, 'sd': 0, 'si': 0}
+            for mutation in all_references[background][fraction].keys():
+                mut_total = all_references[background][fraction][mutation]['total']
+                if mut_total >= cutoff:
+                    # find all DNA entries with high enough counts
+                    for dna_error, c in all_references[background][fraction][mutation]['dna'].items():
+                        # dna_error = max(all_references[background][fraction][mutation]['dna'],
+                        #  key=lambda key: all_references[background][fraction][mutation]['dna'][key])
+                        if c >= cutoff:
+                            try:
+                                dna_type = classify_dna(dna_error)
+                                dna_count[background + fraction][dna_type] += 1
+                                dna_reads[background + fraction][dna_type] += c
+                                distinct_mutations += 1
+                                total_count += c
+                            except KeyError:
+                                # print(dna_type, dna_error, mut_total)
+                                dna_count[background + fraction]['other'] += 1
+                                dna_reads[background + fraction]['other'] += c
+            print('In background {0} and fraction {1} found {2} distinct mutations with total read count {3}'.format(
+                background, fraction, distinct_mutations, total_count
+            ))
+
+    return pd.DataFrame.from_dict(dna_count), pd.DataFrame.from_dict(dna_reads)
+
+
+def is_mutation_consecutive(mutation):
+    """
+    If only consecutve amino acids are affected, return 'c', else return 'nc'
+    :param mutation:
+    :return:
+    """
+    for pos in range(1, len(mutation)):
+        if mutation[pos][0] != (mutation[pos - 1][0] + 1) :
+            return 'nc'
+    return 'c'
+
+
+def classify_protein(mutation):
+    if mutation is None: # came from empty or broken reads
+        return 'b'
+    else:
+        m = []
+        for pos in range(len(mutation)):
+            t = mutation[pos][1]
+            if t != 'i':
+                m.append(t)
+            else:
+                m.append(t + str(len(mutation[pos][2])) )
+        # need to distinguish between consecutive mutations and likely sequencing errors
+        if 'f' in m:
+            return 'f'
+        elif len(m) == 1:
+            return ''.join(m)
+        elif len(m) >= 1:
+            c = is_mutation_consecutive(mutation) + '-' + ''.join(m)
+            return c
+
+
+def get_protein_composition(all_references, cutoff=10):
+    protein_count = {}
+    protein_reads = {}
+    for background in all_references.keys():
+        for fraction in all_references[background].keys():
+            print('Analysing protein composition in background {0} and fraction {1}. Unusal mutations: '.format(background, fraction))
+            distinct_mutations = 0
+            total_count = 0
+            protein_count[background + '.' + fraction] = {'s': 0, 'd': 0, 'c-dd': 0, 'c-ddd': 0, 'i1': 0, 'i2': 0,
+                            'i3': 0, 'c-ss': 0, 'c-sd': 0, 'c-sdd': 0, 'c-sddd': 0, 'c-si1': 0, 'c-si2': 0, 'c-si3': 0,
+                            'f': 0, 'other': 0, 'b': 0}
+            protein_reads[background + '.' + fraction] = {'s': 0, 'd': 0, 'c-dd': 0, 'c-ddd': 0, 'i1': 0, 'i2': 0,
+                            'i3': 0, 'c-ss': 0, 'c-sd': 0, 'c-sdd': 0, 'c-sddd': 0, 'c-si1': 0, 'c-si2': 0, 'c-si3': 0,
+                            'f': 0, 'other': 0, 'b': 0}
+            for mutation in all_references[background][fraction].keys():
+                mut_total = all_references[background][fraction][mutation]['total']
+                if mut_total >= cutoff:
+                    # find all DNA entries with high enough counts
+                    try:
+                        prot_type = classify_protein(mutation)
+                        protein_count[background + '.' + fraction][prot_type] += 1
+                        protein_reads[background + '.' + fraction][prot_type] += mut_total
+                        distinct_mutations += 1
+                        total_count += mut_total
+                    except KeyError:
+                        # print(prot_type, mutation, mut_total)
+                        protein_count[background + '.' + fraction]['other'] += 1
+                        protein_reads[background + '.' + fraction]['other'] += mut_total
+            print('In background {0} and fraction {1} found {2} distinct mutations with total read count {3}'.format(
+                background, fraction, distinct_mutations, total_count
+            ))
+
+    return pd.DataFrame.from_dict(protein_count), pd.DataFrame.from_dict(protein_reads)
+
+
+def what_appears_n_times(all_references, n, style='protein', fractions=None, effect=None):
+    for background in all_references.keys():
+        if fractions is None:
+            fractions = all_references[background].keys()
+        for fraction in fractions:
+            print('In {0} background and fraction {1} these mutations appear {2} times:'.format(background, fraction, n))
+            for mutation in all_references[background][fraction].keys():
+                if style == 'protein':
+                    if all_references[background][fraction][mutation]['total'] == n\
+                            and classify_protein(mutation) in effect:
+                        print(pretty_mutation(mutation))
+                elif style == 'dna':
+                    for dna, c in all_references[background][fraction][mutation]['dna'].items():
+                        if c == n and classify_dna(dna) in effect:
+                            print(pretty_mutation(dna))
+                else:
+                    print('Please specify either dna or protein as style.')
+                    return
+
+def insertion_composition(all_references, cutoff=2, l=(3,6,9)):
+
+    comp = {length: {k: {'A':0, 'C':0, 'T':0, 'G':0} for k in range(length)} for length in l}
+    for background in all_references.keys():
+        for fraction in all_references[background].keys():
+            for mutation in all_references[background][fraction].keys():
+                for dna_error, c in all_references[background][fraction][mutation]['dna'].items():
+                    if dna_error is None:
+                        continue
+                    if c >= cutoff and len(dna_error) == 1 and classify_dna(dna_error) in ('i3', 'i6', 'i9'):
+                        ins = dna_error[0][2]
+                        ins_len = len(ins)
+                        if ins_len in l:
+                            for pos in range(ins_len):
+                                comp[ins_len][pos][ins[pos]] += 1
+    return comp
 
 
 def calculate_enrichments(all_references):
@@ -403,14 +575,14 @@ def combine_same_reference(dictionary, style='enrich'):
     return combined
 
 
-def find_transposon_histogram(all_references, background):
+def find_transposon_histogram(all_references, background, baseline='baseline'):
     """
     Find all pure trinucleotide deletions and count where they are
     :return: dict
     """
     hist = defaultdict(int)
 
-    for prot_mutation in all_references[background]['baseline']:
+    for prot_mutation in all_references[background][baseline]:
         if prot_mutation is None:
             continue
         elif len(prot_mutation) <= 2:
@@ -480,11 +652,14 @@ def are_mutations_similar(mutation1, mutation2):
 
 
 def pretty_mutation(prot_error):
-    flat = []
-    for point in prot_error:
-        s = ''.join(str(e) for e in point)
-        flat.append(s)
-    return ' '.join(flat)
+    if prot_error is None:
+        return ''
+    else:
+        flat = []
+        for point in prot_error:
+            s = ''.join(str(e) for e in point)
+            flat.append(s)
+        return ' '.join(flat)
 
 
 def generate_positions(ref):
@@ -757,19 +932,32 @@ if __name__ == "__main__":
     4. Call activity scores
     5. Make sequence similarity network
     """
-
-    # all_references = count_multiple_fractions(args.folder, args.baseline, args.debug)
     #
-    # with open('everything.p', 'wb') as f:
-    #     pickle.dump(all_references, f)
+    # all_ref = count_multiple_fractions(args.folder, args.baseline, args.debug)
+    #
+    # with open('nongene.p', 'wb') as f:
+    #     pickle.dump(all_ref, f)
+    with open('S6.p', 'rb') as f:
+        all_ref = pickle.load(f)
 
-    with open('everything.p', 'rb') as f:
-        all_references = pickle.load(f)
+    # for cutoff in [1,2,5,10]:
+    #     dna_count, dna_reads = get_dna_composition(all_ref, cutoff)
+    #     protein_count, protein_reads = get_protein_composition(all_ref, cutoff)
+    #
+    #     print(cutoff)
+    #     print(dna_count)
+    #     print(dna_reads)
+    #     print(protein_count)
+    #     print(protein_reads)
 
-    combined_enrich = combine_same_reference(calculate_enrichments(all_references))
-    combined_counts = combine_same_reference(all_references, style='counts')
+    what_appears_n_times(all_ref, 20, style='protein', effect=['d'], fractions=['d3'])
 
-    hist = find_transposon_histogram(all_references, 'eGFP')
+    # comp = insertion_composition(S6)
+    #
+    # combined_enrich = combine_same_reference(calculate_enrichments(all_references))
+    # combined_counts = combine_same_reference(all_references, style='counts')
+    #
+    # hist = find_transposon_histogram(all_references, 'eGFP')
 
 
     # shared = find_shared_entries(combined_counts['eGFP'], combined_counts['GFP8'])
