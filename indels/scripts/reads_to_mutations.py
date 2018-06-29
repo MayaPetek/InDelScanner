@@ -252,7 +252,7 @@ def aa_depth_for_mutation(prot_error, aa_depth):
     return avg_depth
 
 
-# Combine data from different activity fractions
+# Raw processing of all alignments, get composition
 
 def count_one_fraction(alignment, aa_depth, debug):
     """
@@ -498,6 +498,7 @@ def what_appears_n_times(all_references, n, style='protein', fractions=None, eff
                     print('Please specify either dna or protein as style.')
                     return
 
+
 def insertion_composition(all_references, cutoff=2, l=(3,6,9)):
 
     comp = {length: {k: {'A':0, 'C':0, 'T':0, 'G':0} for k in range(length)} for length in l}
@@ -515,6 +516,60 @@ def insertion_composition(all_references, cutoff=2, l=(3,6,9)):
                                 comp[ins_len][pos][ins[pos]] += 1
     return comp
 
+
+def find_transposon_histogram(all_references, background, baseline='baseline'):
+    """
+    Find all pure trinucleotide deletions and count where they are in DNA
+    :return: dict
+    """
+    hist = defaultdict(int)
+
+    for prot_mutation in all_references[background][baseline]:
+        if prot_mutation is None:
+            continue
+        elif len(prot_mutation) <= 2:
+            for dna_mutation, count in all_references[background][baseline][prot_mutation]['dna'].items():
+                if classify_dna(dna_mutation) == 'd3':
+                    hist[int(dna_mutation[0][0])] += count
+
+    return hist
+
+
+def dna_mutation_frequencies(all_references):
+    """
+    Generate data for a histogram of DNA mutation frequencies - how many occur once, twice, ...
+    :param all_references:
+    :return:
+    """
+    freq = {}  # for each library ('d3', 'i6', etc.) give a dictionary {1: 5 times, 2: 3 times...}
+    for background in all_references.keys():
+        for fraction in all_references[background].keys():
+            freq[fraction] = defaultdict(int)
+            for prot_mutation in all_references[background][fraction].keys():
+                for dna_mutation, c in all_references[background][fraction][prot_mutation]['dna'].items():
+                    if classify_dna(dna_mutation) == fraction:
+                        freq[fraction][c] += 1
+    return freq
+
+
+def insertion_frequencies(all_references):
+    """
+    Generate data for number of different insertions per position.
+    :param all_references:
+    :return:
+    """
+    ins_freq = {}  # for each library ('d3', 'i6', etc.) give a dictionary {1: 5 times, 2: 3 times...}
+    for background in all_references.keys():
+        for fraction in all_references[background].keys():
+            ins_freq[fraction] = defaultdict(int)
+            for prot_mutation in all_references[background][fraction].keys():
+                for dna_mutation, c in all_references[background][fraction][prot_mutation]['dna'].items():
+                    if classify_dna(dna_mutation) == fraction:
+                        ins_freq[fraction][dna_mutation[0][0]] += 1
+    return ins_freq
+
+
+# Find activity
 
 def calculate_enrichments(all_references):
 
@@ -573,24 +628,6 @@ def combine_same_reference(dictionary, style='enrich'):
                     combined[ref][prot_errors] = {fraction: value}
 
     return combined
-
-
-def find_transposon_histogram(all_references, background, baseline='baseline'):
-    """
-    Find all pure trinucleotide deletions and count where they are
-    :return: dict
-    """
-    hist = defaultdict(int)
-
-    for prot_mutation in all_references[background][baseline]:
-        if prot_mutation is None:
-            continue
-        elif len(prot_mutation) <= 2:
-            for dna_mutation, count in all_references[background]['baseline'][prot_mutation]['dna'].items():
-                if len(dna_mutation) == 1 and dna_mutation[0][1:] == ('d', '3'):
-                    hist[int(dna_mutation[0][0])] += count
-
-    return hist
 
 
 def max_activity_fraction(enrich):
@@ -905,6 +942,7 @@ def pca_kmeans(exp_pca, nclusters=2):
 
     return kmeans
 
+
 if __name__ == "__main__":
     """
     Arguments:
@@ -934,8 +972,8 @@ if __name__ == "__main__":
     """
     #
     # all_ref = count_multiple_fractions(args.folder, args.baseline, args.debug)
-    #
-    # with open('nongene.p', 'wb') as f:
+    # #
+    # with open('baseline.p', 'wb') as f:
     #     pickle.dump(all_ref, f)
     with open('S6.p', 'rb') as f:
         all_ref = pickle.load(f)
@@ -950,10 +988,15 @@ if __name__ == "__main__":
     #     print(protein_count)
     #     print(protein_reads)
 
-    what_appears_n_times(all_ref, 20, style='protein', effect=['d'], fractions=['d3'])
+    # what_appears_n_times(all_ref, 20, style='protein', effect=['d'], fractions=['d3'])
 
     # comp = insertion_composition(S6)
     #
+
+    # hist = find_transposon_histogram(all_ref, 'S6', 'd3')
+    # freq = dna_mutation_frequencies(all_ref)
+    ins_freq = insertion_frequencies(all_ref)
+
     # combined_enrich = combine_same_reference(calculate_enrichments(all_references))
     # combined_counts = combine_same_reference(all_references, style='counts')
     #
