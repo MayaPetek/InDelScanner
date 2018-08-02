@@ -42,6 +42,74 @@ def indel_len(sequence, start):
     return l
 
 
+def find_DNA_hgvs(read, ref, verbose):
+    """@ read, ref: MutableSeq objects
+    :return errors - tuple (position, expected triplet, actual triplet, ) / none if broken read
+
+    The assumption is that the reference includes 3 nt either side of the gene of interest. The starting triplet is
+    reported as 'amino acid 0'.
+    """
+    if read is None:
+        if verbose:
+            print('no read provided')
+        return
+
+    # No gap realignment at this point
+    prefix = str(ref.name) + ':c.'
+
+    # quality control that there are no mutations at ends of reads
+    ends = findEnds(read, ref)
+    if not endMatch(read, ref, ends):
+        if verbose:
+            print('ends do not match')
+        return
+
+    # scan read & reference letter by letter, counting position in reference
+    # reads have been trimmed so that reference starts @ 3 (0,1,2 is the extra triplet)
+    dna_errors = []
+    ref_index = ends.get('start') - 2  # if the read starts at 3, this becomes nt 1 (1-based as is HGVS)
+    i = ends.get('start')
+
+    while i < ends.get('end'):
+        # check for differences
+        if read[i] == ref[i]:
+            ref_index += 1
+            i += 1
+
+        elif read[i] == '-':
+            # start of a deletion, format depends on length
+            l = indel_len(read, i)
+            if l == 1:  # format is POSdel
+                dna_errors.append(str(ref_index) + 'del')
+            else:
+                # format is FIRST_LASTdel
+                dna_errors.append(str(ref_index) + '_' + str(ref_index + l - 1) + 'del')
+            i += l
+            ref_index += l
+
+
+        elif ref[i] == '-':
+            # start of an insertion, format is FLANK_FLANKinsSEQ
+            l = indel_len(ref, i)
+            dna_errors.append(str(ref_index -1) + '_' + str(ref_index) + 'ins' + str(read[i:i+l]) )
+            i += l
+
+        else:
+            # substitution: need to include ref. sequence in format 8A>G
+            dna_errors.append(str(ref_index) + str(ref[i]) + '>' + str(read[i]))
+            dna_errors += [(str(ref_index + 1), 's', str(read[i]) )]
+            i += 1
+            ref_index += 1
+
+    # format the result including name of sequence
+    if len(dna_errors) == 1:
+        dna_hgvs = prefix + dna_errors[0]
+    else:
+        dna_hgvs = prefix + '[' + (';').join(dna_errors) + ']'
+
+    return dna_hgvs
+
+
 def find_DNA_diff(read, ref, verbose):
     """
     @ read, ref: MutableSeq objects
@@ -277,6 +345,7 @@ def count_one_fraction(alignment, aa_depth, debug):
         ref = pair[0].seq.tomutable()
         read = pair[1].seq.tomutable()
         read = MutableSeq(str(read).replace('N', '.'), read.alphabet)
+        refname = pair[0].id
         readname = pair[1].id
 
         # trim sequencing read to reference
@@ -284,6 +353,7 @@ def count_one_fraction(alignment, aa_depth, debug):
 
         try:
             dna_errors = find_DNA_diff(read, ref, debug)  # errors = a tuple
+            dna_hgvs = find_DNA_hgvs(read, ref, debug)  # string according to HGVS format (ish)
             prot_errors = find_protein_diff(read, ref, debug)
         except:
             if not dna_errors:
@@ -294,11 +364,14 @@ def count_one_fraction(alignment, aa_depth, debug):
         try:
             one_lane_counts[prot_errors]['total'] += 1
             one_lane_counts[prot_errors]['dna'][dna_errors] += 1
+            one_lane_counts[prot_errors]['dna_hgvs'][dna_hgvs] += 1
         except KeyError:
-            one_lane_counts[prot_errors] = {'dna': defaultdict(int),
+            one_lane_counts[prot_errors] = {'dna': defaultdict(int), 'dna_hgvs': defaultdict(int),
                                             'depth': aa_depth_for_mutation(prot_errors, aa_depth),
                                             'total': 1}
             one_lane_counts[prot_errors]['dna'][dna_errors] += 1
+            one_lane_counts[prot_errors]['dna_hgvs'][dna_hgvs] += 1
+
 
     # count the mutations
     n = 0
@@ -517,7 +590,7 @@ def insertion_composition(all_references, cutoff=2, l=(3,6,9)):
     return comp
 
 
-def find_transposon_histogram(all_references, background, baseline='baseline'):
+def find_transposon_histogram(all_references, background, baseline='baseline', transposon='d3'):
     """
     Find all pure trinucleotide deletions and count where they are in DNA
     :return: dict
@@ -529,10 +602,43 @@ def find_transposon_histogram(all_references, background, baseline='baseline'):
             continue
         elif len(prot_mutation) <= 2:
             for dna_mutation, count in all_references[background][baseline][prot_mutation]['dna'].items():
-                if classify_dna(dna_mutation) == 'd3':
+                if classify_dna(dna_mutation) == transposon:
                     hist[int(dna_mutation[0][0])] += count
 
     return hist
+
+
+def transposon_consesus_seq(all_references, reference, fraction = 'd3', transposon = 'd3'):
+    """
+    Determine the consensus sequence for transposon insertion, by analysing the position of d3 or i3 mutations
+    :param all_references: dictionary containing all mutation data
+    :param reference: BioSeq fasta reference
+    :return: dict with composition by position
+    """
+    consensus = {pos: {'A': 0, 'T': 0, 'C': 0, 'G': 0} for pos in range(5)}
+    ref = SeqIO.read(reference, 'fasta')
+
+    background = str(ref.name)
+
+
+    deletions = all_references[background][fraction]
+    for prot_mutation in deletions.keys():
+        for dna_mutation, count in deletions[prot_mutation]['dna'].items():
+            if classify_dna(dna_mutation) == transposon:  # found the simple mutations: d3 or i3
+                start = int(dna_mutation[0][0])
+                # this position refers to the nt BEFORE the indel in 1-count: hence this is the 1st nt of 5 nt site
+                # say the reference is nnn ATG CTG AAC: for start = 1, we want to retrieve ATGCT -> ref[3:8]
+                if transposon == 'd3':
+                    trans_seq = str(ref[start+2:start+7].seq)
+                # for insertions we want 4 nt before and 1 after the insertion
+                elif transposon == 'i3':
+                    trans_seq = str(ref[start - 1:start + 4].seq)
+                if len(trans_seq) != 5:
+                    continue
+                for pos in range(5):
+                    consensus[pos][trans_seq[pos]] += count
+
+    return consensus
 
 
 def dna_mutation_frequencies(all_references):
@@ -544,11 +650,11 @@ def dna_mutation_frequencies(all_references):
     freq = {}  # for each library ('d3', 'i6', etc.) give a dictionary {1: 5 times, 2: 3 times...}
     for background in all_references.keys():
         for fraction in all_references[background].keys():
-            freq[fraction] = defaultdict(int)
+            freq[background + fraction] = defaultdict(int)
             for prot_mutation in all_references[background][fraction].keys():
                 for dna_mutation, c in all_references[background][fraction][prot_mutation]['dna'].items():
                     if classify_dna(dna_mutation) == fraction:
-                        freq[fraction][c] += 1
+                        freq[background + fraction][c] += 1
     return freq
 
 
@@ -970,13 +1076,15 @@ if __name__ == "__main__":
     4. Call activity scores
     5. Make sequence similarity network
     """
-    #
+
     # all_ref = count_multiple_fractions(args.folder, args.baseline, args.debug)
-    # #
-    # with open('baseline.p', 'wb') as f:
+    #
+    # with open('S6_i3_baseline.p', 'wb') as f:
     #     pickle.dump(all_ref, f)
     with open('S6.p', 'rb') as f:
         all_ref = pickle.load(f)
+
+    i3_cons = transposon_consesus_seq(all_ref, args.reference, fraction = 'i3', transposon = 'i3')
 
     # for cutoff in [1,2,5,10]:
     #     dna_count, dna_reads = get_dna_composition(all_ref, cutoff)
@@ -993,9 +1101,11 @@ if __name__ == "__main__":
     # comp = insertion_composition(S6)
     #
 
-    # hist = find_transposon_histogram(all_ref, 'S6', 'd3')
+    # hist_i3 = find_transposon_histogram(all_ref, 'S6', 'i3', transposon = 'i3')
+    # print(hist_i3)
+    # hist8 = find_transposon_histogram(all_ref, 'GFP8', 'baseline')
     # freq = dna_mutation_frequencies(all_ref)
-    ins_freq = insertion_frequencies(all_ref)
+    # ins_freq = insertion_frequencies(all_ref)
 
     # combined_enrich = combine_same_reference(calculate_enrichments(all_references))
     # combined_counts = combine_same_reference(all_references, style='counts')
