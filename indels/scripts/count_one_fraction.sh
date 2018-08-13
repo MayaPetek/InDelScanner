@@ -1,6 +1,6 @@
 #!/bin/bash
 #========
-# USAGE: count_one_fraction.sh forward.fastq.gz reverse.fastq.gz reference.fa output_name activity totalFile
+# USAGE: count_one_fraction.sh forward.fastq.gz reverse.fastq.gz reference.fa output_name activity
 #========
 
 forwardReads="$1"
@@ -10,7 +10,7 @@ referenceFileBase=${3%.fa}
 referenceSequence=$(sed -n '2p' $3)
 baseName="$4"
 activity="$5"
-totalFile="$6"
+
 
 set -e
 
@@ -94,11 +94,6 @@ fi
 -aformat3 fasta -outfile $baseName.$activity.aln -errfile $baseName.$activity.err
 echo -e "Multiple to one alignment complete\n"
 
-
-#    echo -e "\nCalling mutations"
-#    time /home/maya/Install/Acids/scripts/reads_to_mutations.py -a $baseName.aln -r $referenceFileBase.fa -o $baseName
-#    echo -e "$activity,$baseName.valid_counts.p,$baseName.assembled.depth.txt,$baseName.unassembled.depth.txt" >> $totalFile
-#    echo -e "Found the mutations"
 
 echo -e "\nRemoving intermediate files"
 rm $baseName.$activity.discarded.fastq

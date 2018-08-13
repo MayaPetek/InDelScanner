@@ -42,7 +42,7 @@ def indel_len(sequence, start):
     return l
 
 
-def find_DNA_hgvs(read, ref, verbose):
+def find_DNA_hgvs(read, ref, refname, verbose):
     """@ read, ref: MutableSeq objects
     :return errors - tuple (position, expected triplet, actual triplet, ) / none if broken read
 
@@ -55,7 +55,7 @@ def find_DNA_hgvs(read, ref, verbose):
         return
 
     # No gap realignment at this point
-    prefix = str(ref.name) + ':c.'
+    prefix = str(refname) + ':c.'
 
     # quality control that there are no mutations at ends of reads
     ends = findEnds(read, ref)
@@ -66,6 +66,7 @@ def find_DNA_hgvs(read, ref, verbose):
 
     # scan read & reference letter by letter, counting position in reference
     # reads have been trimmed so that reference starts @ 3 (0,1,2 is the extra triplet)
+    # ref_index denotes HGVS DNA position labeling, i is used for accessing sequence
     dna_errors = []
     ref_index = ends.get('start') - 2  # if the read starts at 3, this becomes nt 1 (1-based as is HGVS)
     i = ends.get('start')
@@ -87,7 +88,6 @@ def find_DNA_hgvs(read, ref, verbose):
             i += l
             ref_index += l
 
-
         elif ref[i] == '-':
             # start of an insertion, format is FLANK_FLANKinsSEQ
             l = indel_len(ref, i)
@@ -97,7 +97,6 @@ def find_DNA_hgvs(read, ref, verbose):
         else:
             # substitution: need to include ref. sequence in format 8A>G
             dna_errors.append(str(ref_index) + str(ref[i]) + '>' + str(read[i]))
-            dna_errors += [(str(ref_index + 1), 's', str(read[i]) )]
             i += 1
             ref_index += 1
 
@@ -322,7 +321,7 @@ def aa_depth_for_mutation(prot_error, aa_depth):
 
 # Raw processing of all alignments, get composition
 
-def count_one_fraction(alignment, aa_depth, debug):
+def count_one_fraction(alignment, aa_depth, refname, debug):
     """
     Don't bother with expected/allowed mutations, just find everything and filter later
     Final format: {DNA error: [(protein error), fraction,
@@ -345,15 +344,15 @@ def count_one_fraction(alignment, aa_depth, debug):
         ref = pair[0].seq.tomutable()
         read = pair[1].seq.tomutable()
         read = MutableSeq(str(read).replace('N', '.'), read.alphabet)
-        refname = pair[0].id
         readname = pair[1].id
 
         # trim sequencing read to reference
         ref, read = trim_read(ref, read)
+        dna_errors, dna_hgvs, prot_erros = None, None, None
 
         try:
             dna_errors = find_DNA_diff(read, ref, debug)  # errors = a tuple
-            dna_hgvs = find_DNA_hgvs(read, ref, debug)  # string according to HGVS format (ish)
+            dna_hgvs = find_DNA_hgvs(read, ref, refname, debug)  # string according to HGVS format (ish)
             prot_errors = find_protein_diff(read, ref, debug)
         except:
             if not dna_errors:
@@ -400,22 +399,22 @@ def count_multiple_fractions(folder, baseline, debug):
     for f in os.listdir(folder):
         if f.endswith('.aln'):
             aln_path = os.path.join(folder, f)
-            ref, fraction, suffix = f.rsplit(".", 2)
+            refname, fraction, suffix = f.rsplit(".", 2)
             print('Counting alignment {0} in background {1} and activity fraction {2}'
-                  .format(f, ref, fraction))
+                  .format(f, refname, fraction))
             # prepare sequencing coverage / depth
-            assembled = os.path.join(folder, ref + '.' + fraction + '.assembled.depth.txt')
-            unassembled = os.path.join(folder, ref + '.' + fraction + '.unassembled.depth.txt')
+            assembled = os.path.join(folder, refname + '.' + fraction + '.assembled.depth.txt')
+            unassembled = os.path.join(folder, refname + '.' + fraction + '.unassembled.depth.txt')
             # assembled = os.path.join(folder, ref + '.assembled.depth.txt')
             # unassembled = os.path.join(folder, ref + '.unassembled.depth.txt')
             aa_depth = depth_by_aa_position(depth_by_nt_position(assembled, unassembled))
 
-            if ref not in all_references.keys():
-                all_references[ref] = {}
+            if refname not in all_references.keys():
+                all_references[refname] = {}
 
             if fraction == baseline:
                 fraction = 'baseline'
-            all_references[ref][fraction] = count_one_fraction(aln_path, aa_depth, debug)
+            all_references[refname][fraction] = count_one_fraction(aln_path, aa_depth, refname, debug)
 
     return all_references
 
@@ -673,6 +672,24 @@ def insertion_frequencies(all_references):
                     if classify_dna(dna_mutation) == fraction:
                         ins_freq[fraction][dna_mutation[0][0]] += 1
     return ins_freq
+
+
+def export_hgvs(all_references, output):
+    """
+    Export DNA mutations and their counts in HGVS format, indended for use with Enrich2.
+    :param all_references:
+    :param output: prefix for CSV files
+    :return:
+    """
+    for background in all_references.keys():
+        for fraction in all_references[background].keys():
+            with open('.'.join((output, background, fraction, 'csv')), 'w') as f:
+                hgvs_writer = csv.writer(f, delimiter=',')
+                for prot in all_ref[background][fraction].keys():
+                    for hgvs, count in all_ref[background][fraction][prot]['dna_hgvs'].items():
+                        if hgvs is None:
+                            continue
+                        hgvs_writer.writerow([hgvs, count])
 
 
 # Find activity
@@ -1058,7 +1075,7 @@ if __name__ == "__main__":
     """
     parser = argparse.ArgumentParser(description='Finds all in-frame mutations in a gene')
     parser.add_argument('-f', '--folder', help='Folder containing multiple sequence alignments', required=True)
-    parser.add_argument('-r', '--reference', required=False)
+    parser.add_argument('-r1', '--reference', required=False)
     parser.add_argument('-d', '--debug', help='Turn on debugging', required=False, action="store_true")  # Visual
     parser.add_argument('-b', '--baseline', help='Name of baseline fraction', required=False)
     args = parser.parse_args()
@@ -1077,14 +1094,16 @@ if __name__ == "__main__":
     5. Make sequence similarity network
     """
 
-    # all_ref = count_multiple_fractions(args.folder, args.baseline, args.debug)
-    #
-    # with open('S6_i3_baseline.p', 'wb') as f:
-    #     pickle.dump(all_ref, f)
-    with open('S6.p', 'rb') as f:
-        all_ref = pickle.load(f)
+    all_ref = count_multiple_fractions(args.folder, args.baseline, args.debug)
+    export_hgvs(all_ref, '180813')
 
-    i3_cons = transposon_consesus_seq(all_ref, args.reference, fraction = 'i3', transposon = 'i3')
+    with open('eGFP_with_hgvs.p', 'wb') as f:
+        pickle.dump(all_ref, f)
+    exit()
+    # with open('S6.p', 'rb') as f:
+    #     all_ref = pickle.load(f)
+    #
+    # i3_cons = transposon_consesus_seq(all_ref, args.reference, fraction = 'i3', transposon = 'i3')
 
     # for cutoff in [1,2,5,10]:
     #     dna_count, dna_reads = get_dna_composition(all_ref, cutoff)
