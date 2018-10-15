@@ -1,6 +1,6 @@
 #!/bin/bash
 #========
-# USAGE: count_one_fraction.sh forward.fastq.gz reverse.fastq.gz reference.fa output_name activity
+# USAGE: one_fraction_local.sh forward.fastq.gz reverse.fastq.gz reference.fa output_name activity
 #========
 
 forwardReads="$1"
