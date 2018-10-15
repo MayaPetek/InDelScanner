@@ -239,7 +239,7 @@ Check quality, match ends, find positions of indels
 """
 
 
-def findEnds(read, ref):
+def findEnds(read, ref, start_offset):
     """
     Figure out where the first symbol of interest in the read is. This start point should be:
     - Not a -.
@@ -258,7 +258,7 @@ def findEnds(read, ref):
             ends["end"] = len(ref) - i
             break
 
-    while (ends.get("aligned") % 3 != 0):
+    while ends.get("aligned") % 3 != start_offset % 3:
         ends["aligned"] += 1
 
     return ends
@@ -305,7 +305,7 @@ def findGap(read):
     return (match.start(1), match.end(1))
 
 
-def gapAlign(read, gap):
+def gapAlign(read, gap, start_offset):
     """
     Perform the "letter-stealing" operation:
     - Find the gap (if there is one).
@@ -323,7 +323,7 @@ def gapAlign(read, gap):
     newread = read
 
     # Shift letters from the end to the start...
-    while movingGap[0] % 3 != 0:
+    while movingGap[0] % 3 != start_offset % 3:
         assert (newread[movingGap[0]] == "-")
 
         # This means we ran out of symbols to steal before we managed to align.

@@ -35,6 +35,7 @@ if sys.version_info[0] < 3:
 
 # Identifying mutations from fasta alignment
 
+
 def indel_len(sequence, start):
     l = 0
     while sequence[start + l] == '-':
@@ -42,12 +43,13 @@ def indel_len(sequence, start):
     return l
 
 
-def find_DNA_hgvs(read, ref, refname, verbose):
+def find_DNA_hgvs(read, ref, refname, verbose=False, start_offset=3, end_trail=3):
     """@ read, ref: MutableSeq objects
     :return errors - tuple (position, expected triplet, actual triplet, ) / none if broken read
 
-    The assumption is that the reference includes 3 nt either side of the gene of interest. The starting triplet is
-    reported as 'amino acid 0'.
+    The assumption is that the reference includes an offset of 3 nt either side of the gene of interest. The starting triplet is
+    reported as 'amino acid 0'. If the offset is less or more, it needs to be set explicitly. end_trail specifies the
+    number of nt after end of gene and is ignored
     """
     if read is None:
         if verbose:
@@ -58,7 +60,7 @@ def find_DNA_hgvs(read, ref, refname, verbose):
     prefix = str(refname) + ':c.'
 
     # quality control that there are no mutations at ends of reads
-    ends = findEnds(read, ref)
+    ends = findEnds(read, ref, start_offset)
     if not endMatch(read, ref, ends):
         if verbose:
             print('ends do not match')
@@ -66,12 +68,19 @@ def find_DNA_hgvs(read, ref, refname, verbose):
 
     # scan read & reference letter by letter, counting position in reference
     # reads have been trimmed so that reference starts @ 3 (0,1,2 is the extra triplet)
+    # in the general case, reference starts @ offset in 0-count
+    # This is equal to the number of nt before ATG
     # ref_index denotes HGVS DNA position labeling, i is used for accessing sequence
     dna_errors = []
-    ref_index = ends.get('start') - 2  # if the read starts at 3, this becomes nt 1 (1-based as is HGVS)
+    ref_index = ends.get('start') - start_offset + 1  # if the read starts at 3, this becomes nt 1 (1-based as is HGVS)
     i = ends.get('start')
 
-    while i < ends.get('end'):
+    if ref_index < 1: # don't wish to consider mutations in the vector sequence before start of gene
+        skip = 1 - ref_index
+        i += skip
+        ref_index += skip
+
+    while i < ends.get('end') - end_trail: # the trailing nt are ignored when reading mutations
         # check for differences
         if read[i] == ref[i]:
             ref_index += 1
@@ -109,13 +118,14 @@ def find_DNA_hgvs(read, ref, refname, verbose):
     return dna_hgvs
 
 
-def find_DNA_diff(read, ref, verbose):
+def find_DNA_diff(read, ref, verbose=False, start_offset=3, end_trail=3):
     """
     @ read, ref: MutableSeq objects
     :return errors - tuple (position, expected triplet, actual triplet, ) / none if broken read
 
     The assumption is that the reference includes 3 nt either side of the gene of interest. The starting triplet is
     reported as 'amino acid 0'.
+    As for HGVS, the starting offset and number of trailing nt are variable
     Letter by letter report mutations in NGS read, all counts 1- based in result (code in 0-count).
     - substitution: 78C = nt 78 in reference is changed to C
     - deletions: 78d6 = 6 nt deleted after 78: 1-78, d6, 85-end
@@ -130,19 +140,24 @@ def find_DNA_diff(read, ref, verbose):
     # No gap realignment at this point
 
     # quality control that there are no mutations at ends of reads
-    ends = findEnds(read, ref)
+    ends = findEnds(read, ref, start_offset)
     if not endMatch(read, ref, ends):
         if verbose:
             print('ends do not match')
         return
 
     # scan read & reference letter by letter, counting position in reference
-    # reads have been trimmed so that reference starts @ 3 (0,1,2 is the extra triplet)
+    # reads have been trimmed so that reference starts @ offset=3 by default (0,1,2 is the extra triplet)
     dna_errors = []
-    ref_index = ends.get('start') - 3
+    ref_index = ends.get('start') - start_offset + 1
     i = ends.get('start')
 
-    while i < ends.get('end'):
+    if ref_index < 1: # don't wish to consider mutations in the vector sequence before start of gene
+        skip = 1 - ref_index
+        i += skip
+        ref_index += skip
+
+    while i < ends.get('end') - end_trail:
         # check for differences
         if read[i] == ref[i]:
             ref_index += 1
@@ -180,12 +195,12 @@ def find_DNA_diff(read, ref, verbose):
     return tuple(dna_errors)
 
 
-def find_protein_diff(read, ref, verbose):
+def find_protein_diff(read, ref, verbose=False, start_offset=3, end_trail=3):
 
     # quality control
     if read is None:
         return
-    ends = findEnds(read, ref)
+    ends = findEnds(read, ref, start_offset)
     if not endMatch(read, ref, ends):
         return
 
@@ -196,9 +211,14 @@ def find_protein_diff(read, ref, verbose):
     # move letters when encountering an indel
     prot_errors = []
     i = ends.get('aligned')
-    ref_index = int(ends.get('aligned') / 3)   # reference amino acid index
+    ref_index = int((ends.get('aligned') - start_offset )/ 3) + 1  # reference amino acid index
 
-    while i <= ends.get('end'):
+    if ref_index < 1: # don't wish to consider mutations in the vector sequence before start of gene
+        skip = 1 - ref_index
+        i += 3*skip
+        ref_index += skip
+
+    while i <= ends.get('end') - end_trail:
         if newread is None:
             break
         ref_codon = newref[i:i+3]
@@ -348,7 +368,7 @@ def count_one_fraction(alignment, aa_depth, refname, debug):
 
         # trim sequencing read to reference
         ref, read = trim_read(ref, read)
-        dna_errors, dna_hgvs, prot_erros = None, None, None
+        dna_errors, dna_hgvs, prot_errors = None, None, None
 
         try:
             dna_errors = find_DNA_diff(read, ref, debug)  # errors = a tuple
@@ -591,7 +611,7 @@ def insertion_composition(all_references, cutoff=2, l=(3,6,9)):
 
 def find_transposon_histogram(all_references, background, baseline='baseline', transposon='d3'):
     """
-    Find all pure trinucleotide deletions and count where they are in DNA
+    Find all mutation of a certain type and count where they are in DNA
     :return: dict
     """
     hist = defaultdict(int)
@@ -607,18 +627,30 @@ def find_transposon_histogram(all_references, background, baseline='baseline', t
     return hist
 
 
-def transposon_consesus_seq(all_references, reference, fraction = 'd3', transposon = 'd3'):
+def rev_comp(nt):
+    complement = {'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}
+    return complement[nt]
+
+def transposon_consensus_seq(all_references, reference, fraction='d3', transposon='d3'):
     """
     Determine the consensus sequence for transposon insertion, by analysing the position of d3 or i3 mutations
     :param all_references: dictionary containing all mutation data
     :param reference: BioSeq fasta reference
+    :param fraction: name of the activity fraction / library to be analysed
+    :param transposon: which type of mutations are we counting
     :return: dict with composition by position
     """
     consensus = {pos: {'A': 0, 'T': 0, 'C': 0, 'G': 0} for pos in range(5)}
+    baseline = {pos: {'A': 0, 'T': 0, 'C': 0, 'G': 0} for pos in range(5)}
     ref = SeqIO.read(reference, 'fasta')
 
-    background = str(ref.name)
+    for i in range(2, len(ref)-7):
+        trans_seq = str(ref[i:i+5].seq)
+        for pos in range(5):
+            baseline[pos][trans_seq[pos]] += 1
+            baseline[pos][rev_comp(trans_seq[4 - pos])] += 1
 
+    background = str(ref.name)
 
     deletions = all_references[background][fraction]
     for prot_mutation in deletions.keys():
@@ -636,8 +668,9 @@ def transposon_consesus_seq(all_references, reference, fraction = 'd3', transpos
                     continue
                 for pos in range(5):
                     consensus[pos][trans_seq[pos]] += count
+                    consensus[pos][rev_comp(trans_seq[4 - pos])] += count
 
-    return consensus
+    return baseline, consensus
 
 
 def dna_mutation_frequencies(all_references):
@@ -1075,7 +1108,7 @@ if __name__ == "__main__":
     """
     parser = argparse.ArgumentParser(description='Finds all in-frame mutations in a gene')
     parser.add_argument('-f', '--folder', help='Folder containing multiple sequence alignments', required=True)
-    parser.add_argument('-r1', '--reference', required=False)
+    parser.add_argument('-r', '--reference', required=False)
     parser.add_argument('-d', '--debug', help='Turn on debugging', required=False, action="store_true")  # Visual
     parser.add_argument('-b', '--baseline', help='Name of baseline fraction', required=False)
     args = parser.parse_args()
@@ -1095,13 +1128,23 @@ if __name__ == "__main__":
     """
 
     all_ref = count_multiple_fractions(args.folder, args.baseline, args.debug)
-    export_hgvs(all_ref, '180813')
+    export_hgvs(all_ref, 'new_script')
 
-    with open('eGFP_with_hgvs.p', 'wb') as f:
-        pickle.dump(all_ref, f)
-    exit()
+    # with open('GFP8_with_hgvs.p', 'wb') as f:
+    #     pickle.dump(all_ref, f)
+
+    # with open('gfp_with_hgvs_20180827.p', 'rb') as f:
+    #     all_ref = pickle.load(f)
+    #
+    # d3_baseline, d3_cons = transposon_consensus_seq(all_ref, args.reference, fraction='baseline', transposon='d3')
+
     # with open('S6.p', 'rb') as f:
     #     all_ref = pickle.load(f)
+    #
+    # d3_baseline, d3_cons = transposon_consensus_seq(all_ref, args.reference, fraction='d3', transposon='d3')
+    #
+    # pprint.pprint(d3_baseline)
+    # pprint.pprint(d3_cons)
     #
     # i3_cons = transposon_consesus_seq(all_ref, args.reference, fraction = 'i3', transposon = 'i3')
 

@@ -15,8 +15,6 @@ def printErrors(errors, read, ref, colouredDiff):
     @param colouredDiff If true, will print a fancy coloured diff instead of a concise error summary.
     """
 
-    errors = list(errors)
-    errors = ' '.join(errors)
     print(errors)
     
     if colouredDiff:
@@ -28,25 +26,24 @@ def printErrors(errors, read, ref, colouredDiff):
                 print(" ", end='')
 
         print()
-        print("|...." * 20);
+        print("|...." * 20)
 
         for i in range(0, len(ref)):
             if i > 0 and i % 100 == 0:
-                print(); # Add a newline after each 100 symbols.
+                print()  # Add a newline after each 100 symbols.
 
-            refChar = str(ref)[i];
-            readChar = str(read)[i];
+            refChar = str(ref)[i]
+            readChar = str(read)[i]
 
             if refChar != "-":
                 if refChar == readChar:
-                    print(colored(refChar, 'green'), end='');
+                    print(colored(refChar, 'green'), end='')  # no change
                 elif readChar != "-":
-                    # Substitution
-                    print(colored(readChar, 'red'), end='');
+                    print(colored(readChar, 'red'), end='')  # Substitution
                 else:
-                    print(refChar, end='');
+                    print(refChar, end='')  # Deletion
             else:
-                print(colored(readChar, 'blue'), end='');
+                print(colored(readChar, 'blue'), end='')  # Insertion
                 
         print()
 
