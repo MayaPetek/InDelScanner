@@ -26,7 +26,8 @@ if sys.version_info[0] < 3:
 
 # Identifying mutations from fasta alignment
 
-def read_is_wt(read,ref):
+
+def read_is_wt(read, ref):
     """
     Check whether read sequence is exactly equal to wt.
     :param read:
@@ -51,9 +52,9 @@ def find_DNA_hgvs(read, ref, refname, verbose=False, start_offset=3, end_trail=3
     """@ read, ref: MutableSeq objects
     :return errors - tuple (position, expected triplet, actual triplet, ) / none if broken read
 
-    The assumption is that the reference includes an offset of 3 nt either side of the gene of interest. The starting triplet is
-    reported as 'amino acid 0'. If the offset is less or more, it needs to be set explicitly. end_trail specifies the
-    number of nt after end of gene and is ignored
+    The assumption is that the reference includes an offset of 3 nt either side of the gene of interest, such that the
+    starting triplet is reported as 'amino acid 0'. If the offset is different, it needs to be set explicitly.
+    end_trail specifies the  number of nt after end of gene and is ignored
     """
     if read is None:
         if verbose:
@@ -104,7 +105,7 @@ def find_DNA_hgvs(read, ref, refname, verbose=False, start_offset=3, end_trail=3
             # start of an insertion, format is FLANK_FLANKinsSEQ
             l = indel_len(ref, i)
             if ref_index > 0:
-                dna_errors.append(str(ref_index -1) + '_' + str(ref_index) + 'ins' + str(read[i:i+l]) )
+                dna_errors.append(str(ref_index - 1) + '_' + str(ref_index) + 'ins' + str(read[i:i+l]))
             i += l
 
         else:
@@ -185,7 +186,7 @@ def find_DNA_diff(read, ref, verbose=False, start_offset=3, end_trail=3):
             # check for frameshifts
             if l % 3 == 0:
                 if ref_index > 0:
-                    dna_errors += [(str(ref_index), 'i', str(read[i:i+l]) )]
+                    dna_errors += [(str(ref_index), 'i', str(read[i:i+l]))]
                 i += l
             else:
                 dna_errors += [(str(ref_index), 'f')]
@@ -194,7 +195,7 @@ def find_DNA_diff(read, ref, verbose=False, start_offset=3, end_trail=3):
         else:
             # substitution
             if ref_index > 0:
-                dna_errors += [(str(ref_index + 1), 's', str(read[i]) )]
+                dna_errors += [(str(ref_index + 1), 's', str(read[i]))]
             i += 1
             ref_index += 1
 
@@ -235,7 +236,7 @@ def find_protein_diff(read, ref, verbose=False, start_offset=3, end_trail=3):
                 break
 
             if '-' in ref_codon:  # something very broken
-                prot_errors.append((ref_index,'f'))
+                prot_errors.append((ref_index, 'f'))
                 return tuple(prot_errors)
             elif read_codon == '---':  # single codon deletion
                 if ref_index > 0:
@@ -266,7 +267,7 @@ def find_protein_diff(read, ref, verbose=False, start_offset=3, end_trail=3):
                     prot_errors.append((ref_index, 'f'))
                     return tuple(prot_errors)
                 if ref_index > 0:
-                    prot_errors.append((ref_index, 'i', str(translate(insertion)) ))
+                    prot_errors.append((ref_index, 'i', str(translate(insertion))))
                 i += l
                 ref_index += 1
             else:  # realign gap and repeat loop at same position to compare the codons
@@ -322,7 +323,7 @@ def count_one_fraction(alignment, refname, debug, start_offset, end_trail):
         # trim sequencing read to reference
         ref, read = trim_read(ref, read)
 
-        if read_is_wt(read,ref):
+        if read_is_wt(read, ref):
             if debug:
                 trimmed_read = re.search(r'^-+([AGCTN][ACGTN-]+[ACGTN])-+$', str(read))
                 print()
@@ -334,7 +335,7 @@ def count_one_fraction(alignment, refname, debug, start_offset, end_trail):
 
         try:
             dna_errors = find_DNA_diff(read, ref, debug, start_offset, end_trail)  # errors = a tuple
-            dna_hgvs = find_DNA_hgvs(read, ref, refname, debug, start_offset, end_trail)  # string according to HGVS format (ish)
+            dna_hgvs = find_DNA_hgvs(read, ref, refname, debug, start_offset, end_trail)  # string in HGVS format (ish)
             prot_errors = find_protein_diff(read, ref, debug, start_offset, end_trail)
             # print()
             # print(readname)
@@ -356,7 +357,6 @@ def count_one_fraction(alignment, refname, debug, start_offset, end_trail):
             one_lane_counts[prot_errors]['dna'][dna_errors] += 1
             one_lane_counts[prot_errors]['dna_hgvs'][dna_hgvs] += 1
 
-
     # count the mutations
     n = 0
     threshold = 10
@@ -374,18 +374,21 @@ def count_multiple_fractions(folder, baseline, debug, start_offset, end_trail):
     """
     Process all reference.fraction.aln files in given  folder
     :param folder: contains all *.aln
-    :param baseline: string containing name of baseline
+    :param baseline: string containing name of baseline - needed for DNA HGVS format
+    :param debug: if True, print reads with mutations
+    :param start_offset: number of nt in fasta file before the gene starts
+    :param end_trail: number of nt to ignore at the end
     :return:
     """
     all_references = {}
 
     print(os.listdir(folder))
-    for f in os.listdir(folder):
-        if f.endswith('.aln'):
-            aln_path = os.path.join(folder, f)
-            refname, fraction, suffix = f.rsplit(".", 2)
+    for alnfile in os.listdir(folder):
+        if alnfile.endswith('.aln'):
+            aln_path = os.path.join(folder, alnfile)
+            refname, fraction, suffix = alnfile.rsplit(".", 2)
             print('Counting alignment {0} in background {1} and activity fraction {2}'
-                  .format(f, refname, fraction))
+                  .format(alnfile, refname, fraction))
 
             if refname not in all_references.keys():
                 all_references[refname] = {}
@@ -474,12 +477,12 @@ def get_dna_composition(all_references, cutoff=10):
                         # dna_error = max(all_references[background][fraction][mutation]['dna'],
                         #  key=lambda key: all_references[background][fraction][mutation]['dna'][key])
                         if c >= cutoff:
+                            dna_type = classify_dna(dna_error)
+                            if dna_type == 'wt':
+                                continue
+                            elif dna_type == 'b':
+                                print(dna_type, dna_error, mut_total)
                             try:
-                                dna_type = classify_dna(dna_error)
-                                if dna_type == 'wt':
-                                    continue
-                                elif dna_type == 'b':
-                                    print(dna_type, dna_error, mut_total)
                                 dna_count[background + fraction][dna_type] += 1
                                 dna_reads[background + fraction][dna_type] += c
                                 distinct_mutations += 1
@@ -488,9 +491,6 @@ def get_dna_composition(all_references, cutoff=10):
                                 print(dna_type, dna_error, mut_total)
                                 dna_count[background + fraction]['other'] += 1
                                 dna_reads[background + fraction]['other'] += c
-            # print('In background {0} and fraction {1} found {2} distinct mutations with total read count {3}'.format(
-            #     background, fraction, distinct_mutations, total_count
-            # ))
 
     return pd.DataFrame.from_dict(dna_count), pd.DataFrame.from_dict(dna_reads)
 
@@ -502,7 +502,7 @@ def is_mutation_consecutive(mutation):
     :return:
     """
     for pos in range(1, len(mutation)):
-        if mutation[pos][0] != (mutation[pos - 1][0] + 1) :
+        if mutation[pos][0] != (mutation[pos - 1][0] + 1):
             return 'nc'
     return 'c'
 
@@ -542,9 +542,9 @@ def get_protein_composition(all_references, cutoff=10):
     return pd.DataFrame.from_dict(protein_count), pd.DataFrame.from_dict(protein_reads)
 
 
-def insertion_composition(all_references, cutoff=2, l=(3,6,9)):
+def insertion_composition(all_references, cutoff=2, l=(3, 6, 9)):
 
-    comp = {length: {k: {'A':0, 'C':0, 'T':0, 'G':0} for k in range(length)} for length in l}
+    comp = {length: {k: {'A': 0, 'C': 0, 'T': 0, 'G': 0} for k in range(length)} for length in l}
     for background in all_references.keys():
         for fraction in all_references[background].keys():
             for mutation in all_references[background][fraction].keys():
@@ -590,6 +590,7 @@ def transposon_consensus_seq(all_references, reference, fraction='d3', transposo
     :param reference: BioSeq fasta reference
     :param fraction: name of the activity fraction / library to be analysed
     :param transposon: which type of mutations are we counting
+    :param start_offset
     :return: dict with composition by position
     """
     consensus = {pos: {'A': 0, 'T': 0, 'C': 0, 'G': 0} for pos in range(5)}
@@ -702,7 +703,6 @@ if __name__ == "__main__":
     # with open(args.output +'.p', 'wb') as f:
     #     pickle.dump(all_ref, f)
 
-
     # Later, load in the results for analysis
     with open(args.output + '.p', 'rb') as f:
         all_ref = pickle.load(f)
@@ -729,7 +729,8 @@ if __name__ == "__main__":
 
     # 3. Find TransDel consensus sequence in -3 bp library - gives number of observations for the NNNNN target site
     # This is used for WebLogo in Fig. 3A
-    d3_baseline, d3_cons = transposon_consensus_seq(all_ref, args.reference, fraction='d3', start_offset=args.start_offset)
+    d3_baseline, d3_cons = transposon_consensus_seq(all_ref, args.reference, fraction='d3',
+                                                    start_offset=args.start_offset)
     print('TransDel consensus sequence: baseline counts (reflect GC composition)')
     pprint.pprint(d3_baseline)
     print('TransDel consensus counts')
