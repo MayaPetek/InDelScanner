@@ -48,7 +48,7 @@ def indel_len(sequence, start):
     return l
 
 
-def find_DNA_hgvs(read, ref, refname, verbose=False, start_offset=3, end_trail=3):
+def find_dna_hgvs(read, ref, refname, verbose=False, start_offset=3, end_trail=3):
     """@ read, ref: MutableSeq objects
     :return errors - tuple (position, expected triplet, actual triplet, ) / none if broken read
 
@@ -119,12 +119,12 @@ def find_DNA_hgvs(read, ref, refname, verbose=False, start_offset=3, end_trail=3
     if len(dna_errors) == 1:
         dna_hgvs = prefix + dna_errors[0]
     else:
-        dna_hgvs = prefix + '[' + (';').join(dna_errors) + ']'
+        dna_hgvs = prefix + '[' + ';'.join(dna_errors) + ']'
 
     return dna_hgvs
 
 
-def find_DNA_diff(read, ref, verbose=False, start_offset=3, end_trail=3):
+def find_dna_diff(read, ref, verbose=False, start_offset=3, end_trail=3):
     """
     @ read, ref: MutableSeq objects
     :return errors - tuple (position, expected triplet, actual triplet, ) / none if broken read
@@ -334,8 +334,8 @@ def count_one_fraction(alignment, refname, debug, start_offset, end_trail):
         dna_errors, dna_hgvs, prot_erros = None, None, None
 
         try:
-            dna_errors = find_DNA_diff(read, ref, debug, start_offset, end_trail)  # errors = a tuple
-            dna_hgvs = find_DNA_hgvs(read, ref, refname, debug, start_offset, end_trail)  # string in HGVS format (ish)
+            dna_errors = find_dna_diff(read, ref, debug, start_offset, end_trail)  # errors = a tuple
+            dna_hgvs = find_dna_hgvs(read, ref, refname, debug, start_offset, end_trail)  # string in HGVS format (ish)
             prot_errors = find_protein_diff(read, ref, debug, start_offset, end_trail)
             # print()
             # print(readname)
@@ -516,11 +516,13 @@ def get_protein_composition(all_references, cutoff=10):
             distinct_mutations = 0
             total_count = 0
             protein_count[background + '.' + fraction] = {'s': 0, 'd': 0, 'c-dd': 0, 'c-ddd': 0, 'i1': 0, 'i2': 0,
-                            'i3': 0, 'c-ss': 0, 'c-sd': 0, 'c-sdd': 0, 'c-sddd': 0, 'c-si1': 0, 'c-si2': 0, 'c-si3': 0,
-                            'f': 0, 'other': 0, 'b': 0}
+                                                          'i3': 0, 'c-ss': 0, 'c-sd': 0, 'c-sdd': 0, 'c-sddd': 0,
+                                                          'c-si1': 0, 'c-si2': 0, 'c-si3': 0, 'f': 0, 'other': 0,
+                                                          'b': 0}
             protein_reads[background + '.' + fraction] = {'s': 0, 'd': 0, 'c-dd': 0, 'c-ddd': 0, 'i1': 0, 'i2': 0,
-                            'i3': 0, 'c-ss': 0, 'c-sd': 0, 'c-sdd': 0, 'c-sddd': 0, 'c-si1': 0, 'c-si2': 0, 'c-si3': 0,
-                            'f': 0, 'other': 0, 'b': 0}
+                                                          'i3': 0, 'c-ss': 0, 'c-sd': 0, 'c-sdd': 0, 'c-sddd': 0,
+                                                          'c-si1': 0, 'c-si2': 0, 'c-si3': 0, 'f': 0, 'other': 0,
+                                                          'b': 0}
             for mutation in all_references[background][fraction].keys():
                 mut_total = all_references[background][fraction][mutation]['total']
                 if mut_total >= cutoff:
