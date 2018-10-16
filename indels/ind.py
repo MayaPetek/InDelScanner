@@ -238,6 +238,28 @@ Check quality, match ends, find positions of indels
 """
 
 
+def trim_read(ref, read):
+    """
+    In Sanger sequencing the read will likely extend beyond the gene reference. Trim both to reference length.
+    :param ref: MutableSeq for the Sanger read
+    :param read: MutableSeq with the reference sequence
+    :return: trimmed ref & read
+    """
+    start, end = 0, len(ref)
+
+    # trim start
+    for i in range(len(ref)):
+        if ref[i] != '-':
+            start = i
+            break
+    for i in range(len(ref), 1, -1):
+        if ref[i-1] != '-':
+            end = i
+            break
+
+    return ref[start:end], read[start:end]
+
+
 def findEnds(read, ref, start_offset):
     """
     Figure out where the first symbol of interest in the read is. This start point should be:

@@ -10,13 +10,15 @@ import argparse
 import glob
 import os
 import csv
+import numpy as np
 
 import Bio
 from Bio import SeqIO, AlignIO
 from Bio.Alphabet import IUPAC
 from Bio.Emboss.Applications import NeedleallCommandline
 
-import numpy as np
+from ind import trim_read
+from composition import find_DNA_hgvs, find_protein_diff
 
 
 def trim_fastq_biopython(in_seq, out_file, rc, q_cutoff=50, consec=5):
@@ -77,28 +79,6 @@ def convert_ab1(ab1_dir, rc):
         os.remove(fastq_fname)
 
 
-def trim_read(ref, read):
-    """
-    In Sanger sequencing the read will likely extend beyond the gene reference. Trim both to reference length.
-    :param ref: MutableSeq for the Sanger read
-    :param read: MutableSeq with the reference sequence
-    :return: trimmed ref & read
-    """
-    start, end = 0, len(ref)
-
-    # trim start
-    for i in range(len(ref)):
-        if ref[i] != '-':
-            start = i
-            break
-    for i in range(len(ref), 1, -1):
-        if ref[i-1] != '-':
-            end = i
-            break
-
-    return ref[start:end], read[start:end]
-
-
 def needle_align(fqname, reffile):
     """
     Use the Emboss Needle package to align fastq read to reference, return trimmed reads from the alignment
@@ -127,6 +107,11 @@ if __name__ == "__main__":
     parser.add_argument('-d', '--directory', help='Directory containing ab1 files', required=True)
     parser.add_argument('--input', help='CSV file documenting samples, encoded with Unicode-8', required=True)
     parser.add_argument('-o', '--output', help='Name of output CSV file', required=True)
+    parser.add_argument('-s', '--start_offset', help='Number of nt before starting ATG (integer)', required=False,
+                        default=3, type=int)
+    parser.add_argument('-e', '--end_trail', help='Number of nt after end of gene (integer)', required=False, default=3,
+                        type=int)
+    parser.add_argument('--debug', help='Turn on debugging', required=False, action="store_true")  # Visual
     args = parser.parse_args()
 
     # convert_ab1(args.directory, rc=True)
@@ -142,7 +127,11 @@ if __name__ == "__main__":
                     sample, primer, suffix = row['File'].split('.')
                     fqname = '.'.join([sample, primer, 'fq'])
                     ref, read = needle_align(fqname, args.reference)
-                    print(ref, read, sep='\n')
+                    sref, sread = trim_read(ref, read)
+
+                    dna_hgvs = find_DNA_hgvs(sread, sref, sample, args.debug, args.start_offset, args.end_trail)  # string according to HGVS format (ish)
+                    prot_errors = find_protein_diff(sread, sref, args.debug, args.start_offset, args.end_trail)
+                    print(dna_hgvs, prot_errors)
 
 
 
