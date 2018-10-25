@@ -10,6 +10,8 @@ import pprint
 
 import pandas as pd
 from collections import defaultdict
+from string import ascii_lowercase
+from ast import literal_eval
 
 from Bio import AlignIO, SeqIO
 from Bio.Alphabet import IUPAC
@@ -202,14 +204,27 @@ def find_dna_diff(read, ref, verbose=False, start_offset=3, end_trail=3):
     return tuple(dna_errors)
 
 
+def format_insertion(ref_index, insertion):
+    inslist = []
+    aa = translate(insertion)
+    stop = False
+    for i in range(len(aa)):
+        inslist.append(str(ref_index) + ascii_lowercase[i] + aa[i])
+        if str(aa[i]) == '*':
+            stop = True
+            break
+
+    return stop, inslist
+
+
 def find_protein_diff(read, ref, verbose=False, start_offset=3, end_trail=3):
 
     # quality control
     if read is None:
-        return
+        return None, None
     ends = findEnds(read, ref, start_offset)
     if not endMatch(read, ref, ends):
-        return
+        return None, None
 
     newread = read
     newref = ref
@@ -217,6 +232,8 @@ def find_protein_diff(read, ref, verbose=False, start_offset=3, end_trail=3):
     # scan reference triplet by triplet
     # move letters when encountering an indel
     prot_errors = []
+    prot_short = []
+
     i = ends.get('aligned')
     ref_index = int((ends.get('aligned') - start_offset)/3) + 1  # reference amino acid index
     max_i = len(ref) - end_trail
@@ -237,10 +254,12 @@ def find_protein_diff(read, ref, verbose=False, start_offset=3, end_trail=3):
 
             if '-' in ref_codon:  # something very broken
                 prot_errors.append((ref_index, 'f'))
-                return tuple(prot_errors)
+                prot_short.append('f')
+                break
             elif read_codon == '---':  # single codon deletion
                 if ref_index > 0:
                     prot_errors += [(ref_index, 'd')]
+                    prot_short.append(str(ref_index) + 'Δ')
                 i += 3
                 ref_index += 1
 
@@ -248,7 +267,8 @@ def find_protein_diff(read, ref, verbose=False, start_offset=3, end_trail=3):
                 l = indel_len(newread, i)
                 if l % 3 != 0:
                     prot_errors.append((ref_index, 'f'))
-                    return tuple(prot_errors)
+                    prot_short.append('f')
+                    break
                 # realign gap and repeat loop at same position to compare the codons
                 gap = findGap(newread[i - 1:])
                 gap = (gap[0] + i - 1, gap[1] + i - 1)
@@ -259,15 +279,21 @@ def find_protein_diff(read, ref, verbose=False, start_offset=3, end_trail=3):
             l = indel_len(newref, i)
             if l % 3 != 0:
                 prot_errors.append((ref_index, 'f'))
-                return tuple(prot_errors)
+                prot_short.append('f')
+                break
             gap = findGap(newref[i-1:])
             if gap[0] == 1:  # insertion after codon
                 insertion = newread[gap[0] + i - 1:gap[1] + i - 1]
                 if '-' in insertion:
                     prot_errors.append((ref_index, 'f'))
-                    return tuple(prot_errors)
+                    prot_short.append('f')
+                    break
                 if ref_index > 0:
-                    prot_errors.append((ref_index, 'i', str(translate(insertion))))
+                    prot_errors.append((ref_index - 1, 'i', str(translate(insertion)))) # position before + insertion
+                    stop, inslist = format_insertion(ref_index - 1, insertion)
+                    prot_short += inslist
+                    if stop:
+                        break
                 i += l
                 ref_index += 1
             else:  # realign gap and repeat loop at same position to compare the codons
@@ -278,8 +304,9 @@ def find_protein_diff(read, ref, verbose=False, start_offset=3, end_trail=3):
         elif translate(read_codon) != translate(ref_codon):  # must be a substitution
             if ref_index > 0:
                 prot_errors.append((ref_index, 's', str(translate(read_codon))))
+                prot_short.append(str(translate(ref_codon) + str(ref_index) + str(translate(read_codon))))
             if str(translate(read_codon)) == '*':
-                return tuple(prot_errors)
+                break
             i += 3
             ref_index += 1
 
@@ -290,7 +317,12 @@ def find_protein_diff(read, ref, verbose=False, start_offset=3, end_trail=3):
     if verbose:
         print(prot_errors)
 
-    return tuple(prot_errors)
+    if prot_short == []:
+        short = 'wt'
+    else:
+        short = '/'.join(prot_short)
+
+    return tuple(prot_errors), short
 
 
 # Raw processing of all alignments, get composition
@@ -336,7 +368,7 @@ def count_one_fraction(alignment, refname, debug, start_offset, end_trail):
         try:
             dna_errors = find_dna_diff(read, ref, debug, start_offset, end_trail)  # errors = a tuple
             dna_hgvs = find_dna_hgvs(read, ref, refname, debug, start_offset, end_trail)  # string in HGVS format (ish)
-            prot_errors = find_protein_diff(read, ref, debug, start_offset, end_trail)
+            prot_errors, prot_short = find_protein_diff(read, ref, debug, start_offset, end_trail)
             # print()
             # print(readname)
             # print(dna_hgvs, prot_errors)
@@ -453,6 +485,9 @@ def classify_protein(mutation):
         elif len(m) >= 1:
             c = is_mutation_consecutive(mutation) + '-' + ''.join(m)
             return c
+
+
+# Retrieve counts for mutations identified in Sanger sequencing
 
 
 # Start composition statistics
@@ -695,7 +730,9 @@ if __name__ == "__main__":
                         default=3, type=int)
     parser.add_argument('-e', '--end_trail', help='Number of nt after end of gene (integer)', required=False, default=0,
                         type=int)
-    parser.add_argument('-o', '--output', help='Filename')
+    parser.add_argument('-p', '--pickle', help='Filename')
+    parser.add_argument('--sanger', required=False)
+    parser.add_argument('-o', '--output', required=False)
     args = parser.parse_args()
 
     # On the first run, analyse all *.aln files in the target folder and create a dictionary of errors
@@ -706,53 +743,75 @@ if __name__ == "__main__":
     #     pickle.dump(all_ref, f)
 
     # Later, load in the results for analysis
-    with open(args.output + '.p', 'rb') as f:
-        all_ref = pickle.load(f)
+    with open(args.pickle + '.p', 'rb') as data:
+        all_ref = pickle.load(data)
 
-    # Now start with statistics
-    # 1. Generate CSV files that give overall composition of libraries on protein and DNA level
-    for cutoff in [1, 10]:
-        dna_count, dna_reads = get_dna_composition(all_ref, cutoff)
-        protein_count, protein_reads = get_protein_composition(all_ref, cutoff)
-        print(cutoff)
-        print(dna_count)
-        print(dna_reads)
-        print(protein_count)
-        print(protein_reads)
-    print()
+    # Check entries for Sanger sequenced variants
+    with open(args.output, 'w') as out:
+        fieldnames = ['DNA_hgvs', 'Protein_short', 'Fluorescence', 'Baseline', 'High', 'Medium', 'Low']
+        writer = csv.DictWriter(out, fieldnames=fieldnames)
+        writer.writeheader()
+        with open(args.sanger, 'r') as inp:
+            reader = csv.DictReader(inp)
+            bins = ['baseline', 'H', 'MM', 'L']
+            for row in reader:
+                dna_hgvs = row['DNA_hgvs']
+                background, error = dna_hgvs.split(':')
+                prot_errors = literal_eval(row['Protein_tuple'])
+                cnt = {}
+                for k in bins:
+                    try:
+                        cnt[k] = all_ref[background][k][prot_errors]['dna_hgvs'][dna_hgvs]
+                    except KeyError:
+                        cnt[k] = 0
+                writer.writerow({'DNA_hgvs': dna_hgvs, 'Protein_short': row['Protein_short'],
+                                 'Fluorescence': row['Fluorescence'],
+                                 'Baseline': cnt['baseline'], 'High': cnt['H'], 'Medium': cnt['MM'], 'Low': cnt['L']})
 
-    # 2. Generate data for a histogram of tranposon insertion sites: best used for -3 bp library, it shows how many
-    #    times a mutation is detected at each DNA position. Spikes corresponds to sites close to tranposon preferred
-    #    insertion sequence (GC rich). Main Fig. 3A
-    histogram = find_transposon_histogram(all_ref, 'S6', baseline='d3', transposon='d3')
-    print('Histogram of transposon bias')
-    pprint.pprint(histogram)
-    print()
-
-    # 3. Find TransDel consensus sequence in -3 bp library - gives number of observations for the NNNNN target site
-    # This is used for WebLogo in Fig. 3A
-    d3_baseline, d3_cons = transposon_consensus_seq(all_ref, args.reference, fraction='d3',
-                                                    start_offset=args.start_offset)
-    print('TransDel consensus sequence: baseline counts (reflect GC composition)')
-    pprint.pprint(d3_baseline)
-    print('TransDel consensus counts')
-    pprint.pprint(d3_cons)
-    print()
-
-    # # 4. Get position by position ACGT composition of insertions - SI Figure
-    ins_composition = insertion_composition(all_ref)
-    print('ACGT composition of insertions, for each position separately')
-    pprint.pprint(ins_composition)
-    print()
+    # # Now start with statistics
+    # # 1. Generate CSV files that give overall composition of libraries on protein and DNA level
+    # for cutoff in [1, 10]:
+    #     dna_count, dna_reads = get_dna_composition(all_ref, cutoff)
+    #     protein_count, protein_reads = get_protein_composition(all_ref, cutoff)
+    #     print(cutoff)
+    #     print(dna_count)
+    #     print(dna_reads)
+    #     print(protein_count)
+    #     print(protein_reads)
+    # print()
     #
-    # 5. Get data for histogram of how often mutations are detected on average - Fig. 3B Poisson-like distribution
-    detection_histogram = dna_mutation_frequencies(all_ref)
-    print('How many mutations occur once, twice, etc. per library')
-    pprint.pprint(detection_histogram)
-    print()
+    # # 2. Generate data for a histogram of tranposon insertion sites: best used for -3 bp library, it shows how many
+    # #    times a mutation is detected at each DNA position. Spikes corresponds to sites close to tranposon preferred
+    # #    insertion sequence (GC rich). Main Fig. 3A
+    # histogram = find_transposon_histogram(all_ref, 'S6', baseline='d3', transposon='d3')
+    # print('Histogram of transposon bias')
+    # pprint.pprint(histogram)
+    # print()
     #
-    # # 6. How diverse are insertions at each position? Maximum of 64 from 64 possible triplets in NNN, more in i6/i9
-    ins_freq = insertion_frequencies(all_ref)
-    print('Diversity of insertions per position')
-    pprint.pprint(ins_freq)
-    print()
+    # # 3. Find TransDel consensus sequence in -3 bp library - gives number of observations for the NNNNN target site
+    # # This is used for WebLogo in Fig. 3A
+    # d3_baseline, d3_cons = transposon_consensus_seq(all_ref, args.reference, fraction='d3',
+    #                                                 start_offset=args.start_offset)
+    # print('TransDel consensus sequence: baseline counts (reflect GC composition)')
+    # pprint.pprint(d3_baseline)
+    # print('TransDel consensus counts')
+    # pprint.pprint(d3_cons)
+    # print()
+    #
+    # # # 4. Get position by position ACGT composition of insertions - SI Figure
+    # ins_composition = insertion_composition(all_ref)
+    # print('ACGT composition of insertions, for each position separately')
+    # pprint.pprint(ins_composition)
+    # print()
+    # #
+    # # 5. Get data for histogram of how often mutations are detected on average - Fig. 3B Poisson-like distribution
+    # detection_histogram = dna_mutation_frequencies(all_ref)
+    # print('How many mutations occur once, twice, etc. per library')
+    # pprint.pprint(detection_histogram)
+    # print()
+    # #
+    # # # 6. How diverse are insertions at each position? Maximum of 64 from 64 possible triplets in NNN, more in i6/i9
+    # ins_freq = insertion_frequencies(all_ref)
+    # print('Diversity of insertions per position')
+    # pprint.pprint(ins_freq)
+    # print()

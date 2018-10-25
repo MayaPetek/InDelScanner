@@ -18,7 +18,7 @@ from Bio.Alphabet import IUPAC
 from Bio.Emboss.Applications import NeedleallCommandline
 
 from ind import trim_read
-from composition import find_DNA_hgvs, find_protein_diff
+from composition import find_dna_hgvs, find_protein_diff
 
 
 def trim_fastq_biopython(in_seq, out_file, rc, q_cutoff=50, consec=5):
@@ -83,7 +83,7 @@ def needle_align(fqname, reffile):
     """
     Use the Emboss Needle package to align fastq read to reference, return trimmed reads from the alignment
     :param fqname: name of fastq file
-    :param argsref: name of reference file
+    :param reffile: name of reference file
     :return:
     """
     prefix, suffix = os.path.splitext(fqname)
@@ -119,6 +119,7 @@ if __name__ == "__main__":
     with open(args.output, 'w') as out:
         fieldnames = ['Sample', 'DNA_hgvs', 'Protein_short', 'Protein_tuple']
         writer = csv.DictWriter(out, fieldnames=fieldnames)
+        writer.writeheader()
         with open(args.input, 'r') as f:
             reader = csv.DictReader(f)
             for row in reader:
@@ -126,12 +127,20 @@ if __name__ == "__main__":
                     # split sample name, read in fastq, run needle, find mutations, write output
                     sample, primer, suffix = row['File'].split('.')
                     fqname = '.'.join([sample, primer, 'fq'])
-                    ref, read = needle_align(fqname, args.reference)
+                    try:
+                        ref, read = needle_align(fqname, args.reference)
+                    except Bio.Application.ApplicationError:
+                        print('Sample {0} cannot align.'.format(sample))
+                        continue
+                    except ValueError:
+                        print('Sample {0} is empty.'.format(sample))
+                        continue
+
                     sref, sread = trim_read(ref, read)
 
-                    dna_hgvs = find_DNA_hgvs(sread, sref, sample, args.debug, args.start_offset, args.end_trail)  # string according to HGVS format (ish)
-                    prot_errors = find_protein_diff(sread, sref, args.debug, args.start_offset, args.end_trail)
-                    print(dna_hgvs, prot_errors)
-
-
-
+                    dna_hgvs = find_dna_hgvs(sread, sref, row['Background'], args.debug, args.start_offset, args.end_trail)
+                    prot_errors, prot_short = find_protein_diff(sread, sref, args.debug, args.start_offset,
+                                                                args.end_trail)
+                    writer.writerow({'Sample': sample, 'DNA_hgvs': dna_hgvs,
+                                     'Protein_short': prot_short, 'Protein_tuple': prot_errors})
+                    print(sample, prot_short, prot_errors, dna_hgvs)
