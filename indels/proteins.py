@@ -199,6 +199,27 @@ def count_all_gates(folder):
     return all_references
 
 
+def export_top_variants(background, fraction, filename, cutoff=100):
+    with open(filename, 'w') as f:
+        csv_writer = csv.writer(f, delimiter=',')
+        csv_writer.writerow(['Mutation', 'Count'])
+        for protein, count in all_ref[background][fraction].items():
+            if count > cutoff:
+                csv_writer.writerow([protein, count])
+    return
+
+
+def single_position_enrichment(background, fraction, cutoff):
+    positions = {pos: {aa:0 for aa in ['A', 'D', 'F', 'G', 'I', 'K', 'L', 'M', 'P', 'V', 'W']}
+                 for pos in ['6', '7a', '10', '12', '14']}
+    positions['8'] = {'A': 0, 'Δ': 0}
+    wt = {'6': 'P', '7a': 'Δ', '8': 'Δ', '10': 'I', '12':'L', '14':'P'}
+    for protein, count in all_ref[background][fraction].items():
+        if count > cutoff:
+            mutations = protein.split('/') # convert into a dictonary: pos + mutation
+            for pos in wt.keys():
+                if  # make the matching work
+
 if __name__ == "__main__":
     """
     Arguments:
@@ -227,23 +248,3 @@ if __name__ == "__main__":
     with open('Remkes_protein.p', 'rb') as f:
         all_ref = pickle.load(f)
 
-    with open('High.csv', 'w') as f:
-        csv_writer = csv.writer(f, delimiter=',')
-        csv_writer.writerow(['Mutation', 'Count'])
-        for protein, count in all_ref['mek']['high'].items():
-            if count > 100:
-                csv_writer.writerow([protein, count])
-
-    with open('Medium.csv', 'w') as f:
-        csv_writer = csv.writer(f, delimiter=',')
-        csv_writer.writerow(['Mutation', 'Count'])
-        for protein, count in all_ref['mek']['med'].items():
-            if count > 100:
-                csv_writer.writerow([protein, count])
-
-    with open('Low.csv', 'w') as f:
-        csv_writer = csv.writer(f, delimiter=',')
-        csv_writer.writerow(['Mutation', 'Count'])
-        for protein, count in all_ref['mek']['low'].items():
-            if count > 4:
-                csv_writer.writerow([protein, count])
