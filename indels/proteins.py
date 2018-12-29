@@ -8,10 +8,7 @@ import csv
 import argparse
 import pprint
 
-import pandas as pd
-from collections import defaultdict
 from string import ascii_lowercase
-from ast import literal_eval
 
 from Bio import SeqIO, AlignIO
 from Bio.SeqRecord import SeqRecord
@@ -20,7 +17,6 @@ from Bio.Seq import Seq
 from Bio.Emboss.Applications import NeedleallCommandline
 
 from ind import trim_read, findEnds, endMatch, findGap, gapAlign
-from output import print_coloured_diff, printErrors
 
 # Demand Python 3.
 if sys.version_info[0] < 3:
@@ -209,16 +205,31 @@ def export_top_variants(background, fraction, filename, cutoff=100):
     return
 
 
-def single_position_enrichment(background, fraction, cutoff):
-    positions = {pos: {aa:0 for aa in ['A', 'D', 'F', 'G', 'I', 'K', 'L', 'M', 'P', 'V', 'W']}
-                 for pos in ['6', '7a', '10', '12', '14']}
-    positions['8'] = {'A': 0, 'Δ': 0}
+def single_position_enrichment(all_ref, background, fraction):
+    valid_aa = {'A', 'D', 'F', 'G', 'I', 'K', 'L', 'M', 'P', 'V', 'W', 'Y', 'Δ'}
+    point_proportions = {pos: {aa: 0 for aa in valid_aa} for pos in ['6', '7a', '8', '10', '12', '14']}
     wt = {'6': 'P', '7a': 'Δ', '8': 'Δ', '10': 'I', '12':'L', '14':'P'}
     for protein, count in all_ref[background][fraction].items():
-        if count > cutoff:
-            mutations = protein.split('/') # convert into a dictonary: pos + mutation
-            for pos in wt.keys():
-                if  # make the matching work
+        if count > 5:
+            # each mutation is a collection of mutations of the format Integer + single letter
+            # AA code, separated by '/'
+            # convert into a dictionary: pos + mutation
+            mutations = protein.split('/')
+            variant = {combo[:-1]: combo[-1] for combo in mutations}
+            # check that all observed amino acids are real and not noise
+            observed_aa = set(variant.values())
+            if not observed_aa.issubset(valid_aa):
+                continue
+            for pos in wt.keys():  # need to do it this way so that WT positions are included
+                try:
+                    aa = variant[pos]
+                except KeyError:
+                    aa = wt[pos]
+                point_proportions[pos][aa] += count
+
+    return point_proportions
+
+
 
 if __name__ == "__main__":
     """
@@ -233,18 +244,24 @@ if __name__ == "__main__":
     parser.add_argument('-o', '--output', required=False)
     args = parser.parse_args()
 
-    # # Convert fq files to protein fasta
-    prot_files = process_all_fastq(args.folder)
-    # # Then make the alignment
-    aln_files = protein_needle(prot_files, args.reference)
+    # # # Convert fq files to protein fasta
+    # prot_files = process_all_fastq(args.folder)
+    # # # Then make the alignment
+    # aln_files = protein_needle(prot_files, args.reference)
 
-    # On the first run, analyse all *.aln files in the target folder and create a dictionary of errors
-    # Structure: all_ref[background][fraction][protein mutation] = all data about the mutations
-    all_ref = count_all_gates(args.folder)
-
-    with open('Remkes_protein.p', 'wb') as f:
-        pickle.dump(all_ref, f)
+    # # On the first run, analyse all *.aln files in the target folder and create a dictionary of errors
+    # # Structure: all_ref[background][fraction][protein mutation] = all data about the mutations
+    # all_ref = count_all_gates(args.folder)
+    #
+    # with open('Remkes_protein.p', 'wb') as f:
+    #     pickle.dump(all_ref, f)
 
     with open('Remkes_protein.p', 'rb') as f:
         all_ref = pickle.load(f)
 
+    gates = ['high', 'med', 'low']
+
+    for frac in gates:
+        print('\n')
+        point = single_position_enrichment(all_ref, 'mek', frac)
+        pprint.pprint(point)
