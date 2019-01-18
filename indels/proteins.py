@@ -30,20 +30,21 @@ if sys.version_info[0] < 3:
 
 def fastq_to_prot_gen(fastq, constant_seq):
     """
-    Read in a fastq file, extract
+    Read in a fastq file. Start with constant sequence and capture the following 45
     :param fastq:
     :param constant_seq:
     :return:
     """
     for dna_record in SeqIO.parse(fastq, 'fastq'):
         dna = str(dna_record.seq)
-        pattern = '(?:' + constant_seq + ')([ACTG]{60})'
-        match = re.search(pattern, dna)
-
-        if not match:
+        # first check whether it fits Remkes' library design
+        gen = 'ATGCCCAAGAAGAAG[ACTG]{3}ACG([ACTG]{3})?CCG(GCG)?[ACTG]{3}CAG[ACTG]{3}AAC[ACTG]{3}GCCCCCGACGGC'
+        good_seq = re.search(gen, dna)
+        if not good_seq:
             continue
-
-        orf = Seq(match.group(1), IUPAC.unambiguous_dna)
+        # then extract the orf and translate it
+        gene = re.search('ATGCCCAAGAAGAAG[ACTG]{36}', dna)
+        orf = Seq(gene.group(0), IUPAC.unambiguous_dna)
         protein = orf.translate()
 
         yield SeqRecord(protein, id=dna_record.id)
@@ -63,8 +64,8 @@ def process_all_fastq(folder):
             prefix, ending = fqfile.rsplit('.', 1)
             print('Converting fastq file {0}'.format(fqfile))
             generator = fastq_to_prot_gen(fq_path, 'CTTTAAGAAGGAGATATACAT')
-            SeqIO.write(generator, prefix + '.prot.fa', 'fasta')
-            prot_files.append(prefix + '.prot.fa')
+            SeqIO.write(generator, prefix + '.filt.prot.fa', 'fasta')
+            prot_files.append(prefix + '.filt.prot.fa')
 
     return prot_files
 
@@ -82,7 +83,7 @@ def protein_needle(prot_files, reffile):
         prefix, suffix = os.path.splitext(fqname)
         alnname = prefix + '.aln'
         needle_cline = NeedleallCommandline(r'/opt/emboss/bin/needleall', asequence=reffile, bsequence=fqname,
-                                            gapopen=5, gapextend=3,
+                                            gapopen=3, gapextend=1, datafile='PNULL',
                                             verbose=False, outfile=alnname, aformat='fasta')
         needle_cline()
 
@@ -107,6 +108,7 @@ def format_prot_insertion(ref_index, aa):
 
     return stop, inslist
 
+
 def find_protein_short(read, ref, ends):
 
     prot_short = []
@@ -114,7 +116,7 @@ def find_protein_short(read, ref, ends):
     i = ends.get('start')
     ref_index = ends.get('start') + 1  # reference amino acid index
 
-    while i < len(ref):
+    while i < ends.get('end'):
         if read[i] != ref[i]:  # found a mutation
             if read[i] == '-':  # found a deletions
                 prot_short.append(str(ref_index) + 'Δ')
@@ -154,12 +156,16 @@ def one_gate (alignment):
         read = str(pair[1].seq)
         readname = pair[1].id
 
+        ref, read = trim_read(ref, read)
+
         # check that there is no frame shift or gross mistranslation
-        ends = {"start": 0, "end": len(ref)}
-        if not endMatch(read, ref, ends, 5):
+        ends = findEnds(read, ref, 0)
+        if not endMatch(read, ref, ends, 2):
+            print(ref, read)
             continue
 
         protein = find_protein_short(read, ref, ends)
+        print(protein)
 
         try:
             counts[protein] += 1
@@ -209,16 +215,16 @@ def export_top_variants(background, fraction, filename, cutoff=100):
     return
 
 
-def single_position_enrichment(background, fraction, cutoff):
-    positions = {pos: {aa:0 for aa in ['A', 'D', 'F', 'G', 'I', 'K', 'L', 'M', 'P', 'V', 'W']}
-                 for pos in ['6', '7a', '10', '12', '14']}
-    positions['8'] = {'A': 0, 'Δ': 0}
-    wt = {'6': 'P', '7a': 'Δ', '8': 'Δ', '10': 'I', '12':'L', '14':'P'}
-    for protein, count in all_ref[background][fraction].items():
-        if count > cutoff:
-            mutations = protein.split('/') # convert into a dictonary: pos + mutation
-            for pos in wt.keys():
-                if  # make the matching work
+# def single_position_enrichment(background, fraction, cutoff):
+#     positions = {pos: {aa:0 for aa in ['A', 'D', 'F', 'G', 'I', 'K', 'L', 'M', 'P', 'V', 'W']}
+#                  for pos in ['6', '7a', '10', '12', '14']}
+#     positions['8'] = {'A': 0, 'Δ': 0}
+#     wt = {'6': 'P', '7a': 'Δ', '8': 'Δ', '10': 'I', '12':'L', '14':'P'}
+#     for protein, count in all_ref[background][fraction].items():
+#         if count > cutoff:
+#             mutations = protein.split('/') # convert into a dictonary: pos + mutation
+#             for pos in wt.keys():
+#                 if  # make the matching work
 
 if __name__ == "__main__":
     """
@@ -234,17 +240,18 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # # Convert fq files to protein fasta
-    prot_files = process_all_fastq(args.folder)
+    # prot_files = process_all_fastq(args.folder)
     # # Then make the alignment
-    aln_files = protein_needle(prot_files, args.reference)
+    # prot_files = ['mek.high.filt.prot.fa', 'mek.med.filt.prot.fa', 'mek.low.filt.prot.fa']
+    # aln_files = protein_needle(prot_files, args.reference)
 
     # On the first run, analyse all *.aln files in the target folder and create a dictionary of errors
     # Structure: all_ref[background][fraction][protein mutation] = all data about the mutations
     all_ref = count_all_gates(args.folder)
-
+    #
     with open('Remkes_protein.p', 'wb') as f:
         pickle.dump(all_ref, f)
 
-    with open('Remkes_protein.p', 'rb') as f:
-        all_ref = pickle.load(f)
+    # with open('Remkes_protein.p', 'rb') as f:
+    #     all_ref = pickle.load(f)
 
