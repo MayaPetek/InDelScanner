@@ -381,10 +381,10 @@ def position_entropy(point_proportions, position):
         if count == 0:
             continue
         else:
-            f_a = (par[p] + count) / (par[n] + 1)
-            S_i -= f_a * math.log(f_a, par[N])
+            f_a = (par['p'] + count) / (par['n'] + 1)
+            S_i -= f_a * math.log(f_a, par['N'])
 
-    return {'entropy': S_i, 'N': N, 'n': n}
+    return S_i
 
 
 def joint_entropy(point_proportions, covar, pos_a, pos_b):
@@ -392,7 +392,25 @@ def joint_entropy(point_proportions, covar, pos_a, pos_b):
     par_a = Shannon_par(point_proportions, pos_a)
     par_b = Shannon_par(point_proportions, pos_b)
     S_ab = 0
+    p = 1 / (par_a['N']*par_b['N'])
+
     #  covariation[pos_a][variant[pos_a]][pos_b][variant[pos_b]] = count
+    for aa_a in covar[pos_a].keys():
+        for aa_b, count in covar[pos_a][aa_a][pos_b].items():
+            f_ab = (p + count)/(par_a['n'] + 1)
+            S_ab -= f_ab * math.log(f_ab, par_a['N']*par_b['N'])
+
+    return S_ab
+
+
+def mutual_information(point_proportions, covar, pos_a, pos_b):
+    S_a = position_entropy(point_proportions, pos_a)
+    S_b = position_entropy(point_proportions, pos_b)
+    S_ab = joint_entropy(point_proportions, covar, pos_a, pos_b)
+    S_ba = joint_entropy(point_proportions, covar, pos_b, pos_a)
+    mi = S_a + S_b - S_ab - S_ba
+    mi_n = mi / S_ab
+    return mi_n
 
 
 if __name__ == "__main__":
@@ -432,7 +450,17 @@ if __name__ == "__main__":
 
     # export_covariation_csv(all_ref, 'mek', 'high', 10)
     point = single_position_enrichment(all_ref, 'mek', 'high', 10)
+    covar = position_covariation(all_ref, 'mek', 'high', 10)
     point_Shannon = {}
     for pos in point.keys():
         point_Shannon[pos] = position_entropy(point, pos)
-    print(point_Shannon)
+    pprint.pprint(point_Shannon)
+
+    joint_MI_normalized = {}
+    for pos_a in point.keys():
+        joint_MI_normalized[pos_a] = {}
+        for pos_b in point.keys():
+            joint_MI_normalized[pos_a][pos_b] = mutual_information(point, covar, pos_a, pos_b)
+
+    pprint.pprint(joint_MI_normalized)
+
