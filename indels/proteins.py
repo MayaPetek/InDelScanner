@@ -295,6 +295,9 @@ def export_single_csv(background, frac, cutoff):
     return
 
 
+# Overall covariation
+
+
 def position_covariation(all_ref, background, frac, cutoff):
 
     valid_aa = {'A', 'D', 'F', 'G', 'I', 'K', 'L', 'M', 'P', 'V', 'W', 'Y', 'Δ'}
@@ -359,6 +362,12 @@ def export_covariation_csv(all_ref, background, frac, cutoff):
 
 
 def Shannon_par(point_proportions, position):
+    """
+    Helper function to calculate Shannon pseudo-count
+    :param point_proportions:
+    :param position:
+    :return:
+    """
     N = 0  # size of amino acid alphabet
     n = 0  # total number of observed variants
     for aa, count in point_proportions[position].items():
@@ -372,7 +381,12 @@ def Shannon_par(point_proportions, position):
 
 
 def position_entropy(point_proportions, position):
-
+    """
+    Shannon entropy of a single position in protein alignment.
+    :param point_proportions:
+    :param position:
+    :return:
+    """
     # point_proportions has the structure point_proportions[pos][aa] = count
     S_i = 0
     par = Shannon_par(point_proportions, position)
@@ -388,7 +402,14 @@ def position_entropy(point_proportions, position):
 
 
 def joint_entropy(point_proportions, covar, pos_a, pos_b):
-
+    """
+    Joint entropy between two positions in a multiple sequence alignmnet.
+    :param point_proportions:
+    :param covar:
+    :param pos_a:
+    :param pos_b:
+    :return:
+    """
     par_a = Shannon_par(point_proportions, pos_a)
     par_b = Shannon_par(point_proportions, pos_b)
     S_ab = 0
@@ -404,6 +425,15 @@ def joint_entropy(point_proportions, covar, pos_a, pos_b):
 
 
 def mutual_information(point_proportions, covar, pos_a, pos_b):
+    """
+    Calculate the mutual information between two positions as the difference in Shannon entropy between the sum of
+    individual positions and their joint entropy.
+    :param point_proportions:
+    :param covar:
+    :param pos_a:
+    :param pos_b:
+    :return:
+    """
     S_a = position_entropy(point_proportions, pos_a)
     S_b = position_entropy(point_proportions, pos_b)
     S_ab = joint_entropy(point_proportions, covar, pos_a, pos_b)
