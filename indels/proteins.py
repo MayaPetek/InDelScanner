@@ -10,6 +10,7 @@ import math
 import pprint
 
 from string import ascii_lowercase
+from collections import Counter
 
 from Bio import SeqIO, AlignIO
 from Bio.SeqRecord import SeqRecord
@@ -225,13 +226,13 @@ def export_top_variants(background, fraction, filename, cutoff=100):
 # Done with counting, start statistics
 
 
-def single_position_enrichment(all_ref, background, fraction, cutoff, ala8 = False):
+def single_position_enrichment(all_ref, background, fraction, cutoff, ala8=False):
     valid_aa = {'A', 'D', 'F', 'G', 'I', 'K', 'L', 'M', 'P', 'V', 'W', 'Y', 'Δ'}
     point_proportions = {pos: {aa: 0 for aa in valid_aa} for pos in ['6', '7a', '8a', '9', '11', '13']}
     wt = {'6': 'P', '7a': 'Δ', '8a': 'Δ', '9': 'I', '11': 'L', '13': 'P'}
 
     if ala8:
-        enrich9 = {aa : {random: 0 for random in valid_aa} for aa in ['A', 'Δ']}
+        enrich9 = {aa: {random: 0 for random in valid_aa} for aa in ['A', 'Δ']}
         enrich11 = {aa: {random: 0 for random in valid_aa} for aa in ['A', 'Δ']}
 
     for protein, count in all_ref[background][fraction].items():
@@ -271,7 +272,7 @@ def single_position_enrichment(all_ref, background, fraction, cutoff, ala8 = Fal
         return point_proportions
 
 
-def export_single_csv(background, frac, cutoff):
+def export_single_position_preference_csv(background, frac, cutoff):
     """
     Summarize single position preferences and export it into a CSV file.
     :param background: 'mek'
@@ -293,6 +294,22 @@ def export_single_csv(background, frac, cutoff):
             frac_writer.writerow(point[pos])
         print('Point enrichments: {0} fraction with cutoff {1}'.format(frac, cutoff))
     return
+
+
+# Find top variants in the positive fraction and check their presence in the lower gates.
+
+
+def top_variant_distribution(mek, fraction, filename):
+
+    top = mek[fraction].most_common(200)
+    with open(filename, 'w') as f:
+
+        csv_writer = csv.writer(f, delimiter=',')
+        csv_writer.writerow(['Mutation', 'High', 'Medium', 'Low', 'Low-v2'])
+        for pair in top:
+            protein = pair[0]
+            csv_writer.writerow([protein, mek['high'][protein], mek['med'][protein],
+                                 mek['low'][protein], mek['low-v2'][protein]])
 
 
 # Overall covariation
@@ -443,6 +460,37 @@ def mutual_information(point_proportions, covar, pos_a, pos_b):
     return mi_n
 
 
+# Extract information from individually sequenced clones
+
+def retrieve_ind_clones(mek, filename, outfile):
+
+    columns = ['Sample', 'Protein'] + list(mek.keys())
+
+    with open(outfile, 'w') as f:
+        writer = csv.DictWriter(f, delimiter=',', fieldnames=columns)
+        writer.writeheader()
+
+        for pair in AlignIO.parse(filename, "fasta", seq_count=2):
+            # both read and ref are MutableSeq
+            ref = str(pair[0].seq)
+            read = str(pair[1].seq)
+            readname = pair[1].id
+
+            ref, read = trim_read(ref, read)
+
+            # check that there is no frame shift or gross mistranslation
+            ends = findEnds(read, ref, 0)
+            if not endMatch(read, ref, ends, 2):
+                continue
+
+            protein = find_protein_short(read, ref, ends)
+            row = {'Sample': readname, 'Protein': protein}
+            for fraction in mek.keys():
+                row[fraction] = mek[fraction][protein]
+
+            writer.writerow(row)
+
+
 if __name__ == "__main__":
     """
     Arguments:
@@ -458,39 +506,62 @@ if __name__ == "__main__":
 
     # # Convert fq files to protein fasta
     # prot_files = process_all_fastq(args.folder)
-    # Then make the alignment
-    # prot_files = ['mek.high.filt.prot.fa', 'mek.low.filt.prot.fa', 'mek.med.filt.prot.fa']
+    # # Then make the alignment
+    # # prot_files = ['mek.high.filt.prot.fa', 'mek.low.filt.prot.fa', 'mek.med.filt.prot.fa']
     # aln_files = protein_needle(prot_files, args.reference)
     #
     # # On the first run, analyse all *.aln files in the target folder and create a dictionary of errors
     # # Structure: all_ref[background][fraction][protein mutation] = all data about the mutations
     # all_ref = count_all_gates(args.folder)
     #
-    # with open('Remkes_protein.p', 'wb') as f:
+    # with open('Remkes_protein_low.p', 'wb') as f:
     #     pickle.dump(all_ref, f)
     #
     with open('Remkes_protein.p', 'rb') as f:
         all_ref = pickle.load(f)
+    with open('Remkes_protein_low.p', 'rb') as f:
+        low = pickle.load(f)
+
+    all_ref['mek']['low-v2'] = low['mek']['low-v2']
+
+    mek = {}
+    for fraction in all_ref['mek'].keys():
+        mek[fraction] = Counter(all_ref['mek'][fraction])
+
+
     # #
-    # export_single_csv('mek', 'high', 10)
-    # export_single_csv('mek', 'med', 5)
-    # export_single_csv('mek', 'low', 3)
+    # export_single_position_preference_csv('mek', 'high', 10)
+    # export_single_position_preference_csv('mek', 'med', 10)
+    # export_single_position_preference_csv('mek', 'low-v2', 10)
     # count_all_observed(all_ref)
     # enrich9, enrich11 = single_position_enrichment(all_ref, 'mek', 'high', 10, True)
 
     # export_covariation_csv(all_ref, 'mek', 'high', 10)
-    point = single_position_enrichment(all_ref, 'mek', 'high', 10)
-    covar = position_covariation(all_ref, 'mek', 'high', 10)
-    point_Shannon = {}
-    for pos in point.keys():
-        point_Shannon[pos] = position_entropy(point, pos)
-    pprint.pprint(point_Shannon)
+    # point = single_position_enrichment(all_ref, 'mek', 'high', 10)
+    # covar = position_covariation(all_ref, 'mek', 'high', 10)
+    # point_Shannon = {}
+    # for pos in point.keys():
+    #     point_Shannon[pos] = position_entropy(point, pos)
+    # pprint.pprint(point_Shannon)
+    #
+    # joint_MI_normalized = {}
+    # for pos_a in point.keys():
+    #     joint_MI_normalized[pos_a] = {}
+    #     for pos_b in point.keys():
+    #         joint_MI_normalized[pos_a][pos_b] = mutual_information(point, covar, pos_a, pos_b)
+    #
+    # pprint.pprint(joint_MI_normalized)
 
-    joint_MI_normalized = {}
-    for pos_a in point.keys():
-        joint_MI_normalized[pos_a] = {}
-        for pos_b in point.keys():
-            joint_MI_normalized[pos_a][pos_b] = mutual_information(point, covar, pos_a, pos_b)
+    # top_variant_distribution('mek', 'low', 'low_enrichment.csv', cutoff=10)
+    # top_variant_distribution(mek, 'high', 'Top hits - High.csv')
+    # top_variant_distribution(mek, 'med', 'Top hits - Med.csv')
+    # top_variant_distribution(mek, 'low', 'Top hits - Low.csv')
+    # top_variant_distribution(mek, 'low-v2', 'Top hits - Low-v2.csv')
 
-    pprint.pprint(joint_MI_normalized)
+    # export_top_variants('mek', 'low', 'MEK_above_5_Low.csv', cutoff=5)
+    # export_top_variants('mek', 'low-v2', 'MEK_above_20_Low-v2.csv', cutoff=20)
+    # export_top_variants('mek', 'med', 'MEK_above_10_Medium.csv', cutoff=10)
+    # export_top_variants('mek', 'high', 'MEK_above_100_High.csv', cutoff=100)
 
+    # aln_file = protein_needle('FRET tested.fasta', args.reference)
+    retrieve_ind_clones(mek, 'FRET tested.aln', 'FRET_counts.csv')
