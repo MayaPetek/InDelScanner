@@ -131,8 +131,8 @@ def find_dna_diff(read, ref, verbose=False, start_offset=3, end_trail=3):
     @ read, ref: MutableSeq objects
     :return errors - tuple (position, expected triplet, actual triplet, ) / none if broken read
 
-    The assumption is that the reference includes 3 nt either side of the gene of interest. The starting triplet is
-    reported as 'amino acid 0'.
+    The default assumption is that the reference includes 3 nt either side of the gene of interest. The starting triplet is
+    reported as 'amino acid 0'. The number of such ignored triplets is set by start-offset.
     As for HGVS, the starting offset and number of trailing nt are variable
     Letter by letter report mutations in NGS read, all counts 1- based in result (code in 0-count).
     - substitution: 78C = nt 78 in reference is changed to C
