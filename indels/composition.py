@@ -355,13 +355,13 @@ def count_one_fraction(alignment, refname, debug, start_offset, end_trail):
         # trim sequencing read to reference
         ref, read = trim_read(ref, read)
 
-        if read_is_wt(read, ref):
-            if debug:
-                trimmed_read = re.search(r'^-+([AGCTN][ACGTN-]+[ACGTN])-+$', str(read))
-                print()
-                print(trimmed_read.group(1))
-                printErrors("WT", read, ref, True)
-            continue
+#         if read_is_wt(read, ref):
+#             if debug:
+#                 trimmed_read = re.search(r'^-+([AGCTN][ACGTN-]+[ACGTN])-+$', str(read))
+#                 print()
+#                 print(trimmed_read.group(1))
+#                 printErrors("WT", read, ref, True)
+#             continue
 
         dna_errors, dna_hgvs, prot_erros = None, None, None
 
@@ -369,10 +369,10 @@ def count_one_fraction(alignment, refname, debug, start_offset, end_trail):
             dna_errors = find_dna_diff(read, ref, debug, start_offset, end_trail)  # errors = a tuple
             dna_hgvs = find_dna_hgvs(read, ref, refname, debug, start_offset, end_trail)  # string in HGVS format (ish)
             prot_errors, prot_short = find_protein_diff(read, ref, debug, start_offset, end_trail)
-            # print()
-            # print(readname)
-            # print(dna_hgvs, prot_errors)
-            # printErrors(dna_errors, read, ref, True)
+#             print()
+#             print(readname)
+#             print(dna_hgvs, prot_errors)
+#             printErrors(dna_errors, read, ref, True)
 
         except:
             if not dna_errors:
@@ -391,7 +391,7 @@ def count_one_fraction(alignment, refname, debug, start_offset, end_trail):
 
     # count the mutations
     n = 0
-    threshold = 10
+    threshold = 1
     for error in one_lane_counts.keys():
         if one_lane_counts[error]['total'] > threshold:
             n += 1
@@ -737,36 +737,36 @@ if __name__ == "__main__":
 
     # On the first run, analyse all *.aln files in the target folder and create a dictionary of errors
     # Structure: all_ref[background][fraction][protein mutation] = all data about the mutations
-    # all_ref = count_multiple_fractions(args.folder, args.baseline, args.debug, args.start_offset, args.end_trail)
+    all_ref = count_multiple_fractions(args.folder, args.baseline, args.debug, args.start_offset, args.end_trail)
     # export_hgvs(all_ref, 'new')
-    # with open(args.output +'.p', 'wb') as f:
-    #     pickle.dump(all_ref, f)
+    with open(args.output +'.p', 'wb') as f:
+        pickle.dump(all_ref, f)
 
     # Later, load in the results for analysis
-    with open(args.pickle + '.p', 'rb') as data:
-        all_ref = pickle.load(data)
+#     with open(args.pickle + '.p', 'rb') as data:
+#         all_ref = pickle.load(data)
 
-    # Check entries for Sanger sequenced variants
-    with open(args.output, 'w') as out:
-        fieldnames = ['DNA_hgvs', 'Protein_short', 'Fluorescence', 'Baseline', 'High', 'Medium', 'Low']
-        writer = csv.DictWriter(out, fieldnames=fieldnames)
-        writer.writeheader()
-        with open(args.sanger, 'r') as inp:
-            reader = csv.DictReader(inp)
-            bins = ['baseline', 'H', 'MM', 'L']
-            for row in reader:
-                dna_hgvs = row['DNA_hgvs']
-                background, error = dna_hgvs.split(':')
-                prot_errors = literal_eval(row['Protein_tuple'])
-                cnt = {}
-                for k in bins:
-                    try:
-                        cnt[k] = all_ref[background][k][prot_errors]['dna_hgvs'][dna_hgvs]
-                    except KeyError:
-                        cnt[k] = 0
-                writer.writerow({'DNA_hgvs': dna_hgvs, 'Protein_short': row['Protein_short'],
-                                 'Fluorescence': row['Fluorescence'],
-                                 'Baseline': cnt['baseline'], 'High': cnt['H'], 'Medium': cnt['MM'], 'Low': cnt['L']})
+#     # Check entries for Sanger sequenced variants
+#     with open(args.output, 'w') as out:
+#         fieldnames = ['DNA_hgvs', 'Protein_short', 'Fluorescence', 'Baseline', 'High', 'Medium', 'Low']
+#         writer = csv.DictWriter(out, fieldnames=fieldnames)
+#         writer.writeheader()
+#         with open(args.sanger, 'r') as inp:
+#             reader = csv.DictReader(inp)
+#             bins = ['baseline', 'H', 'MM', 'L']
+#             for row in reader:
+#                 dna_hgvs = row['DNA_hgvs']
+#                 background, error = dna_hgvs.split(':')
+#                 prot_errors = literal_eval(row['Protein_tuple'])
+#                 cnt = {}
+#                 for k in bins:
+#                     try:
+#                         cnt[k] = all_ref[background][k][prot_errors]['dna_hgvs'][dna_hgvs]
+#                     except KeyError:
+#                         cnt[k] = 0
+#                 writer.writerow({'DNA_hgvs': dna_hgvs, 'Protein_short': row['Protein_short'],
+#                                  'Fluorescence': row['Fluorescence'],
+#                                  'Baseline': cnt['baseline'], 'High': cnt['H'], 'Medium': cnt['MM'], 'Low': cnt['L']})
 
     # # Now start with statistics
     # # 1. Generate CSV files that give overall composition of libraries on protein and DNA level
