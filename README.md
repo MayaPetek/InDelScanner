@@ -13,7 +13,7 @@ The versions given here were used to process the data; compatibility with newer 
 ### Python and Conda dependencies
 InDelScanner is a set of scripts that was developed and tested within the Anaconda tools. The environment is given in InDelScanner.yml. To install go to the InDelScanner directory and use:
 ```
-conda create -f InDelScanner.yml
+conda env create -f InDelScanner.yml
 ```
 Then activate the environment with `source activate InDelScanner` or `conda activate InDelScanner`. The latter is preferred for conda v.4.4 or higher, but can be finicky.
 
