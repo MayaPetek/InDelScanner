@@ -40,7 +40,7 @@ def classify_protein(mutation):
     if mutation is None:  # came from empty or broken reads
         return 'b'
     elif mutation == ():
-        return 'b'
+        return 'wt'
     else:
         m = []
         for pos in range(len(mutation)):
@@ -75,6 +75,22 @@ def is_mutation_consecutive(mutation):
         if mutation[pos][0] != (mutation[pos - 1][0] + 1) :
             return 'nc'
     return 'c'
+
+
+def dna_protein_correspondence(dna_type):
+    """
+    Given a type of dna mutation (d3, d6 etc.), it translates this
+    into what effect this should have on protein for target mutations.
+    """
+    dna_to_prot_type = {'d3':['d', 'c-sd', '*'], 'd6':['c-dd', 'c-sdd', '*'], 'd9':['c-ddd', 'c-sddd', '*'],
+                        'i3':['i1','c-si1', '*'], 'i6': ['i2','c-si2', '*'], 'i9':['i3','c-si3', '*'],
+                        's': ['s', 'c-ss', '*']
+                       }
+    
+    try:
+        return dna_to_prot_type[dna_type]
+    except KeyError:
+        return []
 
 
 def translate_variant_type(dna_type):
