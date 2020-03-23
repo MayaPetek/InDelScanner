@@ -18,7 +18,7 @@ from Bio.Alphabet import IUPAC
 from Bio.Seq import Seq
 from Bio.Emboss.Applications import NeedleallCommandline
 
-from ind import trim_read, findEnds, endMatch, findGap, gapAlign
+from indels.ind import trim_read, findEnds, endMatch, findGap, gapAlign
 
 # Demand Python 3.
 if sys.version_info[0] < 3:
@@ -81,9 +81,9 @@ def protein_needle(prot_files, reffile):
     for fqname in prot_files:
         prefix, suffix = os.path.splitext(fqname)
         alnname = prefix + '.aln'
-        needle_cline = NeedleallCommandline(r'/opt/emboss/bin/needleall', asequence=reffile, bsequence=fqname,
+        needle_cline = NeedleallCommandline(r'needleall', asequence=reffile, bsequence=fqname,
                                             gapopen=3, gapextend=5, datafile='PNULL',
-                                            verbose=False, outfile=alnname, aformat='fasta')
+                                            verbose=False, outfile=alnname, aformat='fasta') # alternative: (r'/opt/emboss/bin/needleall'
         needle_cline()
 
     return aln_files
