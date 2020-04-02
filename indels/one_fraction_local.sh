@@ -22,7 +22,8 @@ echo -e "\nStarting with raw reads..."
 # Assemble reads that overlap in the middle, removing reads containing N
 # most N-containing reads have multiple poor quality calls
 /opt/pear-0.9.10-bin-64/pear-0.9.10-bin-64 -f $forwardReads -r $reverseReads -o $baseName.$activity \
---keep-original --min-overlap 5 --min-assembly-length 0 --quality-threshold 15 --max-uncalled-base 0.01
+--keep-original --min-overlap 5 --min-assembly-length 0 --quality-threshold 15 --max-uncalled-base 0.01 \
+> $baseName.$activity.txt
 # gives output in the form:
 # - $basename.$activity.assembled.fastq
 # - $basename.$activity.unassembled.forward.fastq and $basename.unassembled.reverse.fastq
