@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 
 import sys
-import pickle
-import re
+
 import os
-import csv
-import argparse
-import pprint
+
 
 import pandas as pd
 from collections import defaultdict
@@ -17,24 +14,7 @@ from Bio import AlignIO, SeqIO
 from Bio.Alphabet import IUPAC
 from Bio.Seq import MutableSeq, translate
 
-from ind import trim_read, findEnds, endMatch, findGap, gapAlign
-from output import print_coloured_diff, printErrors
 
-# Identifying mutations from fasta alignment
-
-
-def read_is_wt(read, ref):
-    """
-    Check whether read sequence is exactly equal to wt.
-    :param read:
-    :param ref:
-    :return:
-    """
-    trimmed_read = re.search(r'^-+([AGCTN][ACGTN-]+[ACGTN])-+$', str(read))
-    if trimmed_read is None:
-        return True
-    else:
-        return re.search(str(trimmed_read.group(1)), str(ref)) is not None
 
 
 def indel_len(sequence, start):
@@ -44,83 +24,9 @@ def indel_len(sequence, start):
     return l
 
 
-def find_dna_hgvs(read, ref, refname, verbose=False, start_offset=3, end_trail=3):
-    """@ read, ref: MutableSeq objects
-    :return errors - tuple (position, expected triplet, actual triplet, ) / none if broken read
-
-    The assumption is that the reference includes an offset of 3 nt either side of the gene of interest, such that the
-    starting triplet is reported as 'amino acid 0'. If the offset is different, it needs to be set explicitly.
-    end_trail specifies the  number of nt after end of gene and is ignored
-    """
-    if read is None:
-        if verbose:
-            print('no read provided')
-        return
-
-    # No gap realignment at this point
-    prefix = str(refname) + ':c.'
-
-    # quality control that there are no mutations at ends of reads
-    ends = findEnds(read, ref, start_offset)
-    if not endMatch(read, ref, ends):
-        if verbose:
-            print('ends do not match')
-        return
-
-    # scan read & reference letter by letter, counting position in reference
-    # reads have been trimmed so that reference starts @ 3 (0,1,2 is the extra triplet)
-    # in the general case, reference starts @ offset in 0-count
-    # This is equal to the number of nt before ATG
-    # ref_index denotes HGVS DNA position labeling, i is used for accessing sequence
-    dna_errors = []
-    ref_index = ends.get('start') - start_offset + 1  # if the read starts at 3, this becomes nt 1 (1-based as is HGVS)
-    i = ends.get('start')
-    max_i = len(ref) - end_trail
-
-    while i < ends.get('end'):
-        if i > max_i:  # the trailing nt are ignored when reading mutations
-            break
-        # check for differences
-        if read[i] == ref[i]:
-            ref_index += 1
-            i += 1
-
-        elif read[i] == '-':
-            # start of a deletion, format depends on length
-            l = indel_len(read, i)
-            if ref_index > 0:
-                if l == 1:  # format is POSdel
-                    dna_errors.append(str(ref_index) + 'del')
-                else:
-                    # format is FIRST_LASTdel
-                    dna_errors.append(str(ref_index) + '_' + str(ref_index + l - 1) + 'del')
-            i += l
-            ref_index += l
-
-        elif ref[i] == '-':
-            # start of an insertion, format is FLANK_FLANKinsSEQ
-            l = indel_len(ref, i)
-            if ref_index > 0:
-                dna_errors.append(str(ref_index - 1) + '_' + str(ref_index) + 'ins' + str(read[i:i+l]))
-            i += l
-
-        else:
-            # substitution: need to include ref. sequence in format 8A>G
-            if ref_index > 0:
-                dna_errors.append(str(ref_index) + str(ref[i]) + '>' + str(read[i]))
-            i += 1
-            ref_index += 1
-
-    # format the result including name of sequence
-    if len(dna_errors) == 1:
-        dna_hgvs = prefix + dna_errors[0]
-    else:
-        dna_hgvs = prefix + '[' + ';'.join(dna_errors) + ']'
-
-    return dna_hgvs
 
 
-def find_dna_diff(read, ref, verbose=False, start_offset=3, end_trail=3):
+def find_dna_diff(read, ref, verbose=False, start_offset=0, end_trail=0):
     """
     @ read, ref: MutableSeq objects
     :return errors - tuple (position, expected triplet, actual triplet, ) / none if broken read
@@ -140,13 +46,6 @@ def find_dna_diff(read, ref, verbose=False, start_offset=3, end_trail=3):
         return
 
     # No gap realignment at this point
-
-    # quality control that there are no mutations at ends of reads
-    ends = findEnds(read, ref, start_offset)
-    if not endMatch(read, ref, ends):
-        if verbose:
-            print('ends do not match')
-        return
 
     # scan read & reference letter by letter, counting position in reference
     # reads have been trimmed so that reference starts @ offset=3 by default (0,1,2 is the extra triplet)
@@ -198,17 +97,6 @@ def find_dna_diff(read, ref, verbose=False, start_offset=3, end_trail=3):
     return tuple(dna_errors)
 
 
-def format_insertion(ref_index, insertion):
-    inslist = []
-    aa = translate(insertion)
-    stop = False
-    for i in range(len(aa)):
-        inslist.append(str(ref_index) + ascii_lowercase[i] + aa[i])
-        if str(aa[i]) == '*':
-            stop = True
-            break
-
-    return stop, inslist
 
 
 def find_protein_diff(read, ref, verbose=False, start_offset=3, end_trail=3):
@@ -321,17 +209,16 @@ def find_protein_diff(read, ref, verbose=False, start_offset=3, end_trail=3):
 
 # Raw processing of all alignments, get composition
 
-def count_one_fraction(alignment, refname, debug, start_offset, end_trail):
+def count_one_fraction(alignment, debug, start_offset, end_trail):
     """
     Don't bother with expected/allowed mutations, just find everything and filter later
     Final format: {DNA error: [(protein error), fraction,
-    1. Read reference file
-    2. Scan over reference sequence to generate all possible mutations
-    3. For each ref & read in multiple alignment:
+
+    1. For each ref & read in multiple alignment:
         - verify the read is good quality
         - call the mutation
         - add to count table
-    4. Print counts
+
     """
     # use a regular dictionary
     # when a protein mutation is first encountered, create an entry
@@ -573,23 +460,6 @@ def get_protein_composition(all_references, cutoff=10):
     return pd.DataFrame.from_dict(protein_count), pd.DataFrame.from_dict(protein_reads)
 
 
-def insertion_composition(all_references, cutoff=2, l=(3, 6, 9)):
-
-    comp = {length: {k: {'A': 0, 'C': 0, 'T': 0, 'G': 0} for k in range(length)} for length in l}
-    for background in all_references.keys():
-        for fraction in all_references[background].keys():
-            for mutation in all_references[background][fraction].keys():
-                for dna_error, c in all_references[background][fraction][mutation]['dna'].items():
-                    if dna_error is None:
-                        continue
-                    if c >= cutoff and len(dna_error) == 1 and classify_dna(dna_error) in ('i3', 'i6', 'i9'):
-                        ins = dna_error[0][2]
-                        ins_len = len(ins)
-                        if ins_len in l:
-                            for pos in range(ins_len):
-                                comp[ins_len][pos][ins[pos]] += 1
-    return comp
-
 
 def find_transposon_histogram(all_references, background, baseline='baseline', transposon='d3'):
     """
@@ -614,80 +484,7 @@ def rev_comp(nt):
     return complement[nt]
 
 
-def transposon_consensus_seq(all_references, reference, fraction='d3', transposon='d3', start_offset=3):
-    """
-    Determine the consensus sequence for transposon insertion, by analysing the position of d3 or i3 mutations
-    :param all_references: dictionary containing all mutation data
-    :param reference: BioSeq fasta reference
-    :param fraction: name of the activity fraction / library to be analysed
-    :param transposon: which type of mutations are we counting
-    :param start_offset
-    :return: dict with composition by position
-    """
-    consensus = {pos: {'A': 0, 'T': 0, 'C': 0, 'G': 0} for pos in range(5)}
-    baseline = {pos: {'A': 0, 'T': 0, 'C': 0, 'G': 0} for pos in range(5)}
-    ref = SeqIO.read(reference, 'fasta')
 
-    for i in range(2, len(ref)-7):
-        trans_seq = str(ref[i:i+5].seq)
-        for pos in range(5):
-            baseline[pos][trans_seq[pos]] += 1
-            baseline[pos][rev_comp(trans_seq[4 - pos])] += 1
-
-    background = str(ref.name)
-
-    deletions = all_references[background][fraction]
-    for prot_mutation in deletions.keys():
-        for dna_mutation, count in deletions[prot_mutation]['dna'].items():
-            if classify_dna(dna_mutation) == transposon:  # found the simple mutations: d3 or i3
-                n1 = int(dna_mutation[0][0]) + start_offset - 2
-                # this position refers to the nt in the first position of  the indel in 1-count:
-                # hence this is the 2nd nt of 5 nt site -> need to retrieve start-1:start+4
-                # Correct for offset: if start = 1: this is ref[start_offset]
-                # Therefore N1 = start_offset + start -2
-                if transposon == 'd3':
-                    trans_seq = str(ref[n1:n1+5].seq)
-                if len(trans_seq) != 5:
-                    continue
-                for pos in range(5):
-                    consensus[pos][trans_seq[pos]] += count
-                    consensus[pos][rev_comp(trans_seq[4 - pos])] += count
-
-    return baseline, consensus
-
-
-def dna_mutation_frequencies(all_references):
-    """
-    Generate data for a histogram of DNA mutation frequencies - how many occur once, twice, ...
-    :param all_references:
-    :return:
-    """
-    freq = {}  # for each library ('d3', 'i6', etc.) give a dictionary {1: 5 times, 2: 3 times...}
-    for background in all_references.keys():
-        for fraction in all_references[background].keys():
-            freq[background + fraction] = defaultdict(int)
-            for prot_mutation in all_references[background][fraction].keys():
-                for dna_mutation, c in all_references[background][fraction][prot_mutation]['dna'].items():
-                    if classify_dna(dna_mutation) == fraction:
-                        freq[background + fraction][c] += 1
-    return freq
-
-
-def insertion_frequencies(all_references):
-    """
-    Generate data for number of different insertions per position.
-    :param all_references:
-    :return:
-    """
-    ins_freq = {}  # for each library ('d3', 'i6', etc.) give a dictionary {1: 5 times, 2: 3 times...}
-    for background in all_references.keys():
-        for fraction in all_references[background].keys():
-            ins_freq[fraction] = defaultdict(int)
-            for prot_mutation in all_references[background][fraction].keys():
-                for dna_mutation, c in all_references[background][fraction][prot_mutation]['dna'].items():
-                    if classify_dna(dna_mutation) == fraction:
-                        ins_freq[fraction][dna_mutation[0][0]] += 1
-    return ins_freq
 
 
 def export_hgvs(all_references, output):
